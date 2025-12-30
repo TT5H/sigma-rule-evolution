@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 MAX_WORKERS = 10  # Parallel HTTP workers
-NVD_API_DELAY = 0.7  # NVD API allows 50 requests per 30 seconds
-NVD_API_DELAY_WITH_KEY = 0.15  # With API key: 50 requests per second
+NVD_API_DELAY = 6.0  # NVD API: 5 requests per 30 seconds without key (~0.17 req/sec)
+NVD_API_DELAY_WITH_KEY = 0.6  # With API key: 50 requests per 30 seconds (~1.67 req/sec)
 ATTACK_API_DELAY = 0.1
 NVD_API_KEY = os.environ.get('NVD_API_KEY')
 

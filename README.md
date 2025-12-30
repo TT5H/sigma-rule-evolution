@@ -107,9 +107,9 @@ Detection logic changes represent the largest category, indicating active refine
 
 - **ATT&CK techniques**: 248/252 with dates (98.4%)
 - **CVEs**: 144/144 with dates (100%) - includes descriptions
-- **Threat Reports**: 196/237 with dates (82.7%)
+- **Threat Reports**: 196/238 with dates (82.4%)
 
-> **Note**: Set `NVD_API_KEY` in `.env` file for faster CVE fetching (50 req/sec vs 0.7/sec without key)
+> **Note**: Set `NVD_API_KEY` in `.env` file for faster CVE fetching (~1.67 req/sec with key vs ~0.17 req/sec without, based on NVD's rolling 30-second window, plus exponential backoff)
 
 #### Threat Report Extraction Methods
 1. **URL Pattern Matching** - Fast extraction from date patterns in URLs
@@ -342,7 +342,7 @@ Extracts and fetches publication dates for external references:
 **Features**:
 - Multi-threaded HTTP fetching (configurable workers, default: 10)
 - Parallel Selenium with driver pool (4 Chrome instances)
-- NVD API key support from `.env` file (50 req/sec vs 0.7/sec)
+- NVD API key support from `.env` file (~1.67 req/sec vs ~0.17 req/sec, rolling 30s window)
 - Retry logic with exponential backoff for rate limits
 - 3-phase threat report extraction:
   1. URL pattern matching (instant)
@@ -515,7 +515,7 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 |--------|-------|
 | **ATT&CK Techniques** | 248/252 (98.4%) |
 | **CVEs** | 144/144 (100%) |
-| **Threat Reports** | 196/237 (82.7%) |
+| **Threat Reports** | 196/238 (82.4%) |
 | **Runtime** | ~5-30 min |
 
 **Performance Features:**
@@ -524,7 +524,7 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 |---------|---------------|
 | **Multi-threaded HTTP** | ThreadPoolExecutor with 8-10 workers |
 | **Parallel Selenium** | Driver pool with 4 Chrome instances |
-| **NVD API Key Support** | 50 req/sec vs 0.7 req/sec without key |
+| **NVD API Key Support** | ~1.67 req/sec with key vs ~0.17 req/sec without (rolling 30s window) |
 | **Retry Logic** | Exponential backoff for rate limits |
 
 **Selenium Performance:**
