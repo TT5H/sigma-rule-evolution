@@ -10,7 +10,6 @@ from tqdm import tqdm
 import subprocess
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
 
 
 def get_file_content_at_commit(repo_path, commit_hash, file_path, try_parent=False):

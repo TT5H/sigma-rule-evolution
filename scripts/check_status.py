@@ -4,7 +4,6 @@ Utility script to check the status of the analysis database
 import sqlite3
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
 
 
 def check_status(db_path):
