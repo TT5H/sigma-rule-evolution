@@ -10,6 +10,7 @@ import json
 import re
 import requests
 import time
+import os
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
@@ -17,6 +18,17 @@ import logging
 import sys
 from urllib.parse import urlparse
 from typing import List, Dict, Optional, Set
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+    # Look for .env in current directory and parent directory
+    env_path = Path('.env')
+    if not env_path.exists():
+        env_path = Path(__file__).parent.parent / '.env'
+    load_dotenv(env_path)
+except ImportError:
+    pass  # python-dotenv not installed, will use os.environ directly
 
 # Set up logging
 logging.basicConfig(
@@ -34,8 +46,8 @@ NVD_API_DELAY = 0.7  # NVD API allows 50 requests per 30 seconds - be conservati
 NVD_API_DELAY_WITH_KEY = 0.15  # With API key: 50 requests per second
 ATTACK_API_DELAY = 0.1  # MITRE ATT&CK API is more lenient
 
-# NVD API Key (optional, set via environment variable for faster fetching)
-NVD_API_KEY = None  # Will be loaded from environment if available
+# NVD API Key (loaded from .env file or environment variable)
+NVD_API_KEY = os.environ.get('NVD_API_KEY')  # Will be loaded from .env or environment
 
 
 def extract_attack_techniques(tags_json: str) -> Set[str]:
@@ -92,9 +104,9 @@ def extract_cves(references_json: str) -> Set[str]:
             if not isinstance(ref, str):
                 continue
             
-            # Pattern: CVE-YYYY-NNNNN
+            # Pattern: CVE-YYYY-NNNNN (normalize to uppercase)
             matches = re.findall(r'CVE-\d{4}-\d{4,}', ref, re.IGNORECASE)
-            cves.update(matches)
+            cves.update(m.upper() for m in matches)
         
         return cves
     except Exception as e:
@@ -226,7 +238,8 @@ def fetch_cve_date(cve_id: str, max_retries: int = 5, api_key: str = None) -> tu
     Returns:
         Tuple of (published_date, description) or (None, None) if not found
     """
-    import os
+    # Normalize CVE ID to uppercase (NVD API requires uppercase)
+    cve_id = cve_id.upper()
     
     # Try to get API key from environment if not provided
     if api_key is None:

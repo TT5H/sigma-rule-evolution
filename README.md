@@ -106,8 +106,10 @@ Detection logic changes represent the largest category, indicating active refine
 ### External Dates Coverage
 
 - **ATT&CK techniques**: 248/252 with dates (98.4%)
-- **CVEs**: 89/182 with dates (48.9%) - includes descriptions
+- **CVEs**: 144/144 with dates (100%) - includes descriptions
 - **Threat Reports**: 32/230 with dates (13.9%)
+
+> **Note**: Set `NVD_API_KEY` in `.env` file for faster CVE fetching (50 req/sec vs 0.7/sec without key)
 
 ### Methodology
 
