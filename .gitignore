@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Data (exclude large database files)
+data/*.db
+data/*.db-journal
+data/exports/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sigma repo (if cloned locally)
+sigma/
+
+# Keep reports/ directory files (CSVs, PNGs, MD files are small and shareable)
+# Only exclude large files if needed
+reports/*.pdf
+reports/*.html
+

@@ -1,0 +1,11 @@
+file_path,edit_count
+rules\windows\process_access\sysmon_in_memory_assembly_execution.yml,44
+rules\proxy\proxy_ua_apt.yml,41
+rules\windows\builtin\win_alert_mimikatz_keywords.yml,39
+rules\windows\image_load\image_load_side_load_from_non_system_location.yml,38
+rules\windows\powershell\powershell_script\posh_ps_malicious_commandlets.yml,37
+rules\windows\builtin\win_susp_process_creations.yml,33
+rules\windows\registry\registry_set\registry_set_asep_reg_keys_modification_currentversion.yml,32
+rules\windows\powershell\powershell_cmdline_specific_comb_methods.yml,31
+rules\windows\process_access\sysmon_cred_dump_lsass_access.yml,30
+rules\windows\process_access\proc_access_win_direct_syscall_ntopenprocess.yml,30
