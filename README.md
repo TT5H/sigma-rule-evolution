@@ -331,18 +331,38 @@ Generates comprehensive reports:
 **File**: `scripts/phase6_fetch_external_dates.py`
 
 Extracts and fetches publication dates for external references:
-- **ATT&CK techniques**: From MITRE ATT&CK API
-- **CVEs**: From NVD API (with retry logic)
-- **Threat reports**: From URL patterns and HTML metadata
+- **ATT&CK techniques**: From MITRE ATT&CK enterprise-attack bundle (bulk download)
+- **CVEs**: From NVD API 2.0 (with retry logic and API key support)
+- **Threat reports**: From URL patterns, HTML metadata, and Selenium
 
 **Output**: `attack_techniques`, `cves`, `threat_reports`, and `rule_external_refs` tables
 
 **Purpose**: Enable responsiveness analysis (time between external event and rule update)
 
 **Features**:
-- Retry logic (3 attempts) for rate limits and timeouts
-- HTML metadata extraction (og:published_time, article:published_time)
-- Content-based date extraction as fallback
+- Multi-threaded HTTP fetching (configurable workers, default: 10)
+- Parallel Selenium with driver pool (4 Chrome instances)
+- NVD API key support from `.env` file (50 req/sec vs 0.7/sec)
+- Retry logic with exponential backoff for rate limits
+- 3-phase threat report extraction:
+  1. URL pattern matching (instant)
+  2. HTML meta tags (parallel HTTP)
+  3. Selenium for JS-rendered pages
+
+**Usage**:
+```bash
+# Full run with all features
+python scripts/phase6_fetch_external_dates.py --db-path data/sigma_analysis.db
+
+# Custom workers
+python scripts/phase6_fetch_external_dates.py --workers 8
+
+# Disable Selenium (faster but less coverage)
+python scripts/phase6_fetch_external_dates.py --no-selenium
+```
+
+**Environment Variables**:
+- `NVD_API_KEY`: Set in `.env` file for faster CVE fetching
 
 ---
 
@@ -401,36 +421,162 @@ Extracts and fetches publication dates for external references:
 
 ## Performance & Reliability
 
-The pipeline has been optimized for high throughput and low error rates:
+The pipeline has been optimized for high throughput, low error rates, and efficient resource usage.
 
-### Phase 2 Optimizations
-- **Processing Speed**: 8x faster (33 minutes → 4 minutes)
-- **Throughput**: 5.19 it/s → 41.25 it/s (8x improvement)
-- **Success Rate**: 99.99% (45,691/45,696 rule versions successfully extracted)
-- **Error Rate**: Reduced from 411 errors to just 5 errors (98.8% reduction)
+### Phase 1: Extract Commits
+
+| Metric | Value |
+|--------|-------|
+| **Library** | PyDriller |
+| **Runtime** | ~5-15 min |
+| **Commits Processed** | 10,727 |
+| **Files Tracked** | 10,282 unique rule files |
+
+**Features:**
+- Incremental updates (skips already processed commits)
+- Filters only YAML rule files in `rules/` directories
+- Stores author email for identity merging
+
+---
+
+### Phase 2: Build Snapshots
+
+| Metric | Before | After Optimization |
+|--------|--------|-------------------|
+| **Processing Speed** | 5.19 it/s | 41.25 it/s |
+| **Total Runtime** | 33 min | **4 min** |
+| **Success Rate** | 99.1% | **99.99%** |
+| **Error Count** | 411 | **5** |
 
 **Key Optimizations:**
-- Switched from `git show` to `git cat-file -p` for faster object access
-- Increased parallel workers from 16 to 32
-- Implemented batch database operations (executemany for bulk inserts)
-- Added database indexes and optimized SQLite settings (WAL mode, larger cache)
+- `git cat-file -p` instead of `git show` (faster object access)
+- Increased parallel workers (16 → 32)
+- Batch database operations (`executemany` for bulk inserts)
+- SQLite WAL mode with 256MB cache
 
-### Phase 3 Results
-- **Success Rate**: 99.96% (42,276/42,294 rule versions successfully parsed)
-- **Parse Error Rate**: Only 18 errors (0.04% error rate)
-- **Processing Time**: ~2 minutes for 42K+ rule versions
+---
 
-### Expected Runtime
+### Phase 3: Parse YAML
 
-| Phase | Description | Time |
-|-------|-------------|------|
-| Phase 1 | Extract commits | ~5-15 min |
-| Phase 2 | Build snapshots | ~4-10 min |
-| Phase 3 | Parse YAML | ~2-5 min |
-| Phase 4 | Compute diffs | ~10-20 min |
-| Phase 5 | Generate reports | <1 min |
-| Phase 6 | Fetch external dates | ~5-30 min |
-| **Total** | Full pipeline | **~30-60 min** |
+| Metric | Value |
+|--------|-------|
+| **Rule Versions Parsed** | 44,364 |
+| **Success Rate** | 99.96% |
+| **Parse Errors** | 18 (0.04%) |
+| **Runtime** | ~2-5 min |
+
+**Field Coverage:**
+| Field | Coverage |
+|-------|----------|
+| `title` | 99.9% |
+| `description` | 97.0% |
+| `author` | 96.2% |
+| `tags` | 94.1% |
+| `logsource` | 99.8% |
+| `detection` | 99.9% |
+| `related` | 13.3% |
+
+---
+
+### Phase 4: Compute Diffs
+
+| Metric | Value |
+|--------|-------|
+| **Diffs Computed** | 35,410 |
+| **Runtime** | ~10-20 min |
+| **Success Rate** | 100% |
+
+**Change Detection:**
+- Compares consecutive versions of each rule
+- Detects 6 categories: detection, logsource, tags, references, falsepositives, metadata
+- Line-level diff metrics (additions/deletions)
+
+---
+
+### Phase 5: Generate Reports
+
+| Metric | Value |
+|--------|-------|
+| **Runtime** | < 1 min |
+| **Outputs** | 5 CSV files, 4 PNG charts |
+| **Dependencies** | matplotlib, seaborn, pandas |
+
+**Visualizations Generated:**
+- `edits_over_time.png` - Commit activity timeline
+- `top_contributors.png` - Contributor distribution
+- `change_taxonomy.png` - Change type breakdown
+- `days_since_edit.png` - Rule stability histogram
+
+---
+
+### Phase 6: Fetch External Dates
+
+| Metric | Value |
+|--------|-------|
+| **ATT&CK Techniques** | 248/252 (98.4%) |
+| **CVEs** | 144/144 (100%) |
+| **Threat Reports** | 196/237 (82.7%) |
+| **Runtime** | ~5-30 min |
+
+**Performance Features:**
+
+| Feature | Implementation |
+|---------|---------------|
+| **Multi-threaded HTTP** | ThreadPoolExecutor with 8-10 workers |
+| **Parallel Selenium** | Driver pool with 4 Chrome instances |
+| **NVD API Key Support** | 50 req/sec vs 0.7 req/sec without key |
+| **Retry Logic** | Exponential backoff for rate limits |
+
+**Selenium Performance:**
+| Method | Time per URL | 58 URLs |
+|--------|--------------|---------|
+| Sequential (1 driver) | ~5.2s | ~5 min |
+| Parallel (4 drivers) | ~1.6s | **~1.5 min** |
+
+**Threat Report Extraction Methods:**
+1. **URL Patterns** - Instant extraction from `/YYYY/MM/DD/` patterns
+2. **HTML Meta Tags** - Parallel HTTP for `og:published_time`, `article:published_time`
+3. **Selenium** - Headless Chrome for JS-rendered pages (Unit42, CISA)
+
+**Source Coverage:**
+| Domain | Coverage |
+|--------|----------|
+| securelist.com | 100% |
+| mandiant.com | 100% |
+| blog.talosintelligence.com | 100% |
+| labs.sentinelone.com | 100% |
+| unit42.paloaltonetworks.com | 96% |
+| www.sentinelone.com | 94% |
+| www.fireeye.com | 89% |
+| www.trendmicro.com | 84% |
+| www.cisa.gov | 64% |
+| www.crowdstrike.com | 7% |
+
+---
+
+### Expected Runtime Summary
+
+| Phase | Description | Runtime | Success Rate |
+|-------|-------------|---------|--------------|
+| Phase 1 | Extract commits | ~5-15 min | 100% |
+| Phase 2 | Build snapshots | ~4-10 min | 99.99% |
+| Phase 3 | Parse YAML | ~2-5 min | 99.96% |
+| Phase 4 | Compute diffs | ~10-20 min | 100% |
+| Phase 5 | Generate reports | <1 min | 100% |
+| Phase 6 | Fetch external dates | ~5-30 min | 90%+ |
+| **Total** | Full pipeline | **~30-60 min** | **>99%** |
+
+---
+
+### Resource Usage
+
+| Resource | Recommendation |
+|----------|----------------|
+| **RAM** | 4GB+ recommended (Phase 2 is memory-intensive) |
+| **Disk** | ~500MB for database + repo |
+| **CPU** | Multi-core recommended (parallel processing) |
+| **Network** | Required for Phase 6 (API calls) |
+| **Chrome** | Required for Selenium (auto-installed via webdriver-manager) |
 
 ---
 
