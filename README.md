@@ -107,9 +107,14 @@ Detection logic changes represent the largest category, indicating active refine
 
 - **ATT&CK techniques**: 248/252 with dates (98.4%)
 - **CVEs**: 144/144 with dates (100%) - includes descriptions
-- **Threat Reports**: 32/230 with dates (13.9%)
+- **Threat Reports**: 196/237 with dates (82.7%)
 
 > **Note**: Set `NVD_API_KEY` in `.env` file for faster CVE fetching (50 req/sec vs 0.7/sec without key)
+
+#### Threat Report Extraction Methods
+1. **URL Pattern Matching** - Fast extraction from date patterns in URLs
+2. **HTML Meta Tags** - Parallel HTTP fetching for `og:published_time`, `article:published_time`, etc.
+3. **Selenium** - Headless Chrome for JavaScript-rendered pages (Unit42, CISA, etc.)
 
 ### Methodology
 
