@@ -127,6 +127,7 @@ task_sigma/
 - `date`
 - `yaml_text` (raw YAML)
 - Parsed fields: `rule_id`, `title`, `status`, `level`
+- YAML-level fields: `author`, `date`, `modified` (from YAML metadata)
 - `logsource_product`, `logsource_category`, `logsource_service`
 - `tags`, `references`, `falsepositives`, `detection` (JSON)
 - `parse_error` (0/1 flag)

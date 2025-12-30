@@ -28,6 +28,9 @@ def extract_rule_fields(yaml_text):
             'title': rule_data.get('title'),
             'status': rule_data.get('status'),
             'level': rule_data.get('level'),
+            'author': rule_data.get('author'),  # YAML-level author field
+            'date': rule_data.get('date'),  # YAML-level date field (creation date)
+            'modified': rule_data.get('modified'),  # YAML-level modified date
             'logsource_product': None,
             'logsource_category': None,
             'logsource_service': None,
@@ -82,6 +85,9 @@ def extract_rule_fields(yaml_text):
             'title': None,
             'status': None,
             'level': None,
+            'author': None,
+            'date': None,
+            'modified': None,
             'logsource_product': None,
             'logsource_category': None,
             'logsource_service': None,
@@ -166,13 +172,28 @@ def parse_all_yaml(db_path):
     except sqlite3.OperationalError:
         pass
     
+    try:
+        cursor.execute("ALTER TABLE rule_versions ADD COLUMN author TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        cursor.execute("ALTER TABLE rule_versions ADD COLUMN date TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        cursor.execute("ALTER TABLE rule_versions ADD COLUMN modified TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
     conn.commit()
     
-    # Get all unparsed versions
+    # Get all unparsed versions (or versions missing new fields)
     df = pd.read_sql("""
         SELECT file_path, commit_hash, yaml_text
         FROM rule_versions
-        WHERE (rule_id IS NULL OR parse_error IS NULL)
+        WHERE (rule_id IS NULL OR parse_error IS NULL OR author IS NULL)
         ORDER BY date
     """, conn)
     
@@ -236,6 +257,9 @@ def parse_all_yaml(db_path):
             fields.get('title'),
             fields.get('status'),
             fields.get('level'),
+            fields.get('author'),  # YAML-level author
+            fields.get('date'),  # YAML-level date
+            fields.get('modified'),  # YAML-level modified
             fields.get('logsource_product'),
             fields.get('logsource_category'),
             fields.get('logsource_service'),
@@ -263,6 +287,9 @@ def parse_all_yaml(db_path):
                 title = ?,
                 status = ?,
                 level = ?,
+                author = ?,
+                date = ?,
+                modified = ?,
                 logsource_product = ?,
                 logsource_category = ?,
                 logsource_service = ?,

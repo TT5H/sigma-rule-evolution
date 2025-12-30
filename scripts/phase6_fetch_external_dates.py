@@ -210,62 +210,155 @@ def load_attack_techniques_bulk() -> Dict[str, Dict]:
         return {}
 
 
-def fetch_cve_date(cve_id: str) -> Optional[str]:
+def fetch_cve_date(cve_id: str, max_retries: int = 3) -> Optional[str]:
     """
-    Fetch CVE publication date from NVD API.
+    Fetch CVE publication date from NVD API with retry logic.
     """
-    try:
-        # NVD API v2 endpoint
-        url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+    for attempt in range(max_retries):
+        try:
+            # NVD API v2 endpoint
+            url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
+            
+            headers = {
+                'User-Agent': 'SIGMA-Analysis/1.0 (Research Tool)',
+                'Accept': 'application/json'
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'vulnerabilities' in data and len(data['vulnerabilities']) > 0:
+                    vuln = data['vulnerabilities'][0]
+                    cve_item = vuln.get('cve', {})
+                    published = cve_item.get('published')
+                    if published:
+                        return published
+            elif response.status_code == 403:
+                # Rate limit - wait longer
+                logger.debug(f"Rate limited for {cve_id}, waiting...")
+                time.sleep(NVD_API_DELAY * 2)
+                continue
+            elif response.status_code == 404:
+                # CVE not found in NVD
+                logger.debug(f"CVE {cve_id} not found in NVD")
+                return None
+            
+            time.sleep(NVD_API_DELAY)
+            
+        except requests.exceptions.Timeout:
+            logger.debug(f"Timeout fetching {cve_id}, attempt {attempt + 1}/{max_retries}")
+            if attempt < max_retries - 1:
+                time.sleep(NVD_API_DELAY * (attempt + 1))
+                continue
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Request error fetching {cve_id}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(NVD_API_DELAY * (attempt + 1))
+                continue
+        except Exception as e:
+            logger.debug(f"Error fetching CVE {cve_id}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(NVD_API_DELAY)
+                continue
         
-        headers = {
-            'User-Agent': 'SIGMA-Analysis/1.0 (Research Tool)'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            if 'vulnerabilities' in data and len(data['vulnerabilities']) > 0:
-                vuln = data['vulnerabilities'][0]
-                cve_item = vuln.get('cve', {})
-                published = cve_item.get('published')
-                if published:
-                    return published
-        
-        time.sleep(NVD_API_DELAY)
-        return None
-    except Exception as e:
-        logger.debug(f"Error fetching CVE {cve_id}: {e}")
-        return None
+        # Rate limiting between requests
+        if attempt < max_retries - 1:
+            time.sleep(NVD_API_DELAY)
+    
+    return None
 
 
 def fetch_report_date(url: str) -> Optional[str]:
     """
     Attempt to fetch publication date from threat report URL.
-    This is heuristic-based - tries to extract date from URL or fetch from page.
+    Uses multiple strategies:
+    1. Extract date from URL pattern
+    2. Try to fetch from page HTML metadata (og:published_time, article:published_time, etc.)
+    3. Try to extract from page content
     """
     try:
-        # Try to extract date from URL pattern (common in threat reports)
-        # Pattern: /YYYY/MM/DD/ or /YYYY-MM-DD/ or /YYYY/MM/
+        # Strategy 1: Try to extract date from URL pattern (common in threat reports)
+        # Pattern: /YYYY/MM/DD/ or /YYYY-MM-DD/ or /YYYY/MM/ or YYYY/MM/DD
         date_patterns = [
-            r'/(\d{4})/(\d{2})/(\d{2})/',
-            r'/(\d{4})-(\d{2})-(\d{2})/',
-            r'/(\d{4})/(\d{2})/',
+            r'/(\d{4})/(\d{2})/(\d{2})[/-]',  # /2024/01/15/ or /2024/01/15-
+            r'/(\d{4})-(\d{2})-(\d{2})[/-]',  # /2024-01-15/ or /2024-01-15-
+            r'/(\d{4})/(\d{2})[/-]',  # /2024/01/ or /2024/01-
+            r'(\d{4})/(\d{2})/(\d{2})',  # 2024/01/15 (no leading slash)
+            r'(\d{4})-(\d{2})-(\d{2})',  # 2024-01-15 (no leading slash)
         ]
         
         for pattern in date_patterns:
             match = re.search(pattern, url)
             if match:
-                if len(match.groups()) == 3:
-                    year, month, day = match.groups()
-                    return f"{year}-{month}-{day}T00:00:00Z"
-                elif len(match.groups()) == 2:
-                    year, month = match.groups()
-                    return f"{year}-{month}-01T00:00:00Z"
+                groups = match.groups()
+                if len(groups) == 3:
+                    year, month, day = groups
+                    # Validate date components
+                    if 2000 <= int(year) <= 2100 and 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                        return f"{year}-{month}-{day}T00:00:00Z"
+                elif len(groups) == 2:
+                    year, month = groups
+                    if 2000 <= int(year) <= 2100 and 1 <= int(month) <= 12:
+                        return f"{year}-{month}-01T00:00:00Z"
         
-        # Try to fetch from page (for some sources)
-        # This is limited - many sites require JavaScript or have anti-scraping
-        # For now, return None and we can enhance later
+        # Strategy 2: Try to fetch from page HTML metadata
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (Research Tool)'
+            }
+            response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+            
+            if response.status_code == 200:
+                html_content = response.text
+                
+                # Look for common meta tags with publication dates
+                meta_patterns = [
+                    r'<meta\s+property=["\']og:published_time["\']\s+content=["\']([^"\']+)["\']',
+                    r'<meta\s+property=["\']article:published_time["\']\s+content=["\']([^"\']+)["\']',
+                    r'<meta\s+name=["\']published["\']\s+content=["\']([^"\']+)["\']',
+                    r'<meta\s+name=["\']date["\']\s+content=["\']([^"\']+)["\']',
+                    r'<time[^>]*datetime=["\']([^"\']+)["\']',
+                    r'<time[^>]*pubdate[^>]*>([^<]+)</time>',
+                ]
+                
+                for pattern in meta_patterns:
+                    match = re.search(pattern, html_content, re.IGNORECASE)
+                    if match:
+                        date_str = match.group(1)
+                        # Try to parse and normalize the date
+                        try:
+                            # Common formats: 2024-01-15, 2024-01-15T10:30:00Z, etc.
+                            date_match = re.search(r'(\d{4})-(\d{2})-(\d{2})', date_str)
+                            if date_match:
+                                year, month, day = date_match.groups()
+                                if 2000 <= int(year) <= 2100:
+                                    return f"{year}-{month}-{day}T00:00:00Z"
+                        except:
+                            pass
+                
+                # Strategy 3: Look for date patterns in page content (last resort)
+                # Look for patterns like "Published: 2024-01-15" or "Date: January 15, 2024"
+                content_date_patterns = [
+                    r'(?:published|date|posted)[:\s]+(\d{4})-(\d{2})-(\d{2})',
+                    r'(\d{4})-(\d{2})-(\d{2})\s+(?:published|posted|released)',
+                ]
+                
+                for pattern in content_date_patterns:
+                    match = re.search(pattern, html_content, re.IGNORECASE)
+                    if match:
+                        groups = match.groups()
+                        if len(groups) == 3:
+                            year, month, day = groups
+                            if 2000 <= int(year) <= 2100:
+                                return f"{year}-{month}-{day}T00:00:00Z"
+        
+        except requests.exceptions.RequestException:
+            # If we can't fetch the page, that's okay - we tried
+            pass
+        except Exception as e:
+            logger.debug(f"Error fetching page for {url}: {e}")
+        
         return None
         
     except Exception as e:
@@ -473,6 +566,7 @@ def fetch_cve_dates(db_path: str, cves: Set[str]):
     
     fetched = 0
     errors = 0
+    not_found = 0
     
     for cve_id in tqdm(to_fetch, desc="Fetching CVE dates"):
         try:
@@ -486,26 +580,32 @@ def fetch_cve_dates(db_path: str, cves: Set[str]):
                 """, (cve_id, date, datetime.utcnow().isoformat() + 'Z'))
                 fetched += 1
             else:
-                # Store even if we couldn't fetch
+                # Store even if we couldn't fetch (for tracking)
                 cursor.execute("""
                     INSERT OR REPLACE INTO cves 
                     (cve_id, last_fetched)
                     VALUES (?, ?)
                 """, (cve_id, datetime.utcnow().isoformat() + 'Z'))
+                not_found += 1
             
-            if fetched % 10 == 0:
+            # Commit every 10 successful fetches or every 50 attempts
+            if fetched % 10 == 0 or (fetched + not_found) % 50 == 0:
                 conn.commit()
+            
+            # Rate limiting - always sleep between requests
+            time.sleep(NVD_API_DELAY)
+            
         except Exception as e:
             logger.debug(f"Error fetching {cve_id}: {e}")
             errors += 1
             if errors > 10:
-                logger.warning("Too many errors, pausing...")
-                time.sleep(5)
+                logger.warning("Too many errors, pausing for 10 seconds...")
+                time.sleep(10)
                 errors = 0
     
     conn.commit()
     conn.close()
-    logger.info(f"Fetched dates for {fetched} CVEs")
+    logger.info(f"Fetched dates for {fetched} CVEs ({not_found} not found or failed)")
 
 
 def fetch_report_dates(db_path: str, reports: List[Dict[str, str]]):
@@ -543,8 +643,12 @@ def fetch_report_dates(db_path: str, reports: List[Dict[str, str]]):
         if date:
             fetched += 1
         
-        if fetched % 50 == 0:
+        # Commit every 50 reports or every 100 attempts
+        if fetched % 50 == 0 or (fetched + len(to_fetch) - fetched) % 100 == 0:
             conn.commit()
+        
+        # Small delay to be respectful
+        time.sleep(0.2)
     
     conn.commit()
     conn.close()
