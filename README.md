@@ -106,7 +106,7 @@ Detection logic changes represent the largest category, indicating active refine
 ### External Dates Coverage
 
 - **ATT&CK techniques**: 248/252 with dates (98.4%)
-- **CVEs**: 69/182 with dates (37.9%)
+- **CVEs**: 89/182 with dates (48.9%) - includes descriptions
 - **Threat Reports**: 32/230 with dates (13.9%)
 
 ### Methodology
@@ -264,15 +264,19 @@ task_sigma/
 
 - Parses YAML text from `rule_versions` table
 - Extracts structured fields:
-  - `rule_id`, `title`, `status`, `level`
+  - `rule_id`, `title`, `description`, `status`, `level`
   - `author`, `date`, `modified` (YAML-level metadata)
   - `logsource_product`, `logsource_category`, `logsource_service`
   - `tags`, `references`, `falsepositives`, `detection` (JSON)
+  - `related` - Related rules/techniques (JSON)
 - Handles parse errors gracefully (stores `parse_error` flag)
 
 **Output**: Updated `rule_versions` table with parsed fields
 
-**Success Rate**: 99.96% (only 0.04% parse errors)
+**Field Coverage**:
+- `description`: 97.0% of rule versions
+- `related`: 13.3% of rule versions (when rules have related entries)
+- Parse errors: Only 0.04%
 
 ---
 
@@ -356,10 +360,10 @@ Extracts and fetches publication dates for external references:
 - `file_path`, `commit_hash` (PK)
 - `date` (commit date)
 - `yaml_text` (raw YAML)
-- Parsed fields: `rule_id`, `title`, `status`, `level`
-- YAML-level fields: `author`, `modified` (from YAML metadata)
+- Parsed fields: `rule_id`, `title`, `description`, `status`, `level`
+- YAML-level fields: `author`, `date`, `modified` (from YAML metadata)
 - `logsource_product`, `logsource_category`, `logsource_service`
-- `tags`, `references`, `falsepositives`, `detection` (JSON)
+- `tags`, `references`, `falsepositives`, `detection`, `related` (JSON)
 - `parse_error` (0/1 flag)
 
 ### `version_diffs`

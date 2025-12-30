@@ -30,8 +30,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Rate limiting
-NVD_API_DELAY = 0.6  # NVD API allows 50 requests per 30 seconds (0.6s per request)
+NVD_API_DELAY = 0.7  # NVD API allows 50 requests per 30 seconds - be conservative
+NVD_API_DELAY_WITH_KEY = 0.15  # With API key: 50 requests per second
 ATTACK_API_DELAY = 0.1  # MITRE ATT&CK API is more lenient
+
+# NVD API Key (optional, set via environment variable for faster fetching)
+NVD_API_KEY = None  # Will be loaded from environment if available
 
 
 def extract_attack_techniques(tags_json: str) -> Set[str]:
@@ -210,21 +214,42 @@ def load_attack_techniques_bulk() -> Dict[str, Dict]:
         return {}
 
 
-def fetch_cve_date(cve_id: str, max_retries: int = 3) -> Optional[str]:
+def fetch_cve_date(cve_id: str, max_retries: int = 5, api_key: str = None) -> tuple:
     """
-    Fetch CVE publication date from NVD API with retry logic.
+    Fetch CVE publication date and description from NVD API 2.0 with enhanced retry logic.
+    
+    Args:
+        cve_id: CVE identifier (e.g., CVE-2021-44228)
+        max_retries: Maximum number of retry attempts
+        api_key: Optional NVD API key for faster rate limits
+    
+    Returns:
+        Tuple of (published_date, description) or (None, None) if not found
     """
+    import os
+    
+    # Try to get API key from environment if not provided
+    if api_key is None:
+        api_key = os.environ.get('NVD_API_KEY', NVD_API_KEY)
+    
+    # Determine delay based on whether we have an API key
+    delay = NVD_API_DELAY_WITH_KEY if api_key else NVD_API_DELAY
+    
     for attempt in range(max_retries):
         try:
-            # NVD API v2 endpoint
+            # NVD API v2.0 endpoint
             url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
             
             headers = {
-                'User-Agent': 'SIGMA-Analysis/1.0 (Research Tool)',
+                'User-Agent': 'SIGMA-Analysis/1.0 (Academic Research Tool)',
                 'Accept': 'application/json'
             }
             
-            response = requests.get(url, headers=headers, timeout=15)
+            # Add API key if available
+            if api_key:
+                headers['apiKey'] = api_key
+            
+            response = requests.get(url, headers=headers, timeout=30)
             
             if response.status_code == 200:
                 data = response.json()
@@ -232,41 +257,79 @@ def fetch_cve_date(cve_id: str, max_retries: int = 3) -> Optional[str]:
                     vuln = data['vulnerabilities'][0]
                     cve_item = vuln.get('cve', {})
                     published = cve_item.get('published')
+                    
+                    # Extract description (English preferred)
+                    description = None
+                    descriptions = cve_item.get('descriptions', [])
+                    for desc in descriptions:
+                        if desc.get('lang') == 'en':
+                            description = desc.get('value', '')
+                            break
+                    if not description and descriptions:
+                        description = descriptions[0].get('value', '')
+                    
                     if published:
-                        return published
+                        return published, description
+                    
+                # CVE found but no published date
+                return None, None
+                
             elif response.status_code == 403:
-                # Rate limit - wait longer
-                logger.debug(f"Rate limited for {cve_id}, waiting...")
-                time.sleep(NVD_API_DELAY * 2)
+                # Rate limit - exponential backoff
+                wait_time = delay * (2 ** attempt)
+                logger.debug(f"Rate limited for {cve_id}, waiting {wait_time:.1f}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
                 continue
+                
             elif response.status_code == 404:
                 # CVE not found in NVD
                 logger.debug(f"CVE {cve_id} not found in NVD")
-                return None
+                return None, None
+                
+            elif response.status_code == 503:
+                # Service unavailable - longer wait
+                wait_time = 5 * (attempt + 1)
+                logger.debug(f"NVD service unavailable for {cve_id}, waiting {wait_time}s")
+                time.sleep(wait_time)
+                continue
             
-            time.sleep(NVD_API_DELAY)
+            else:
+                logger.debug(f"Unexpected status {response.status_code} for {cve_id}")
+                time.sleep(delay)
             
         except requests.exceptions.Timeout:
-            logger.debug(f"Timeout fetching {cve_id}, attempt {attempt + 1}/{max_retries}")
+            wait_time = delay * (attempt + 1)
+            logger.debug(f"Timeout fetching {cve_id}, attempt {attempt + 1}/{max_retries}, waiting {wait_time:.1f}s")
             if attempt < max_retries - 1:
-                time.sleep(NVD_API_DELAY * (attempt + 1))
+                time.sleep(wait_time)
                 continue
+                
+        except requests.exceptions.ConnectionError as e:
+            wait_time = 2 * (attempt + 1)
+            logger.debug(f"Connection error for {cve_id}: {e}, waiting {wait_time}s")
+            if attempt < max_retries - 1:
+                time.sleep(wait_time)
+                continue
+                
         except requests.exceptions.RequestException as e:
             logger.debug(f"Request error fetching {cve_id}: {e}")
             if attempt < max_retries - 1:
-                time.sleep(NVD_API_DELAY * (attempt + 1))
+                time.sleep(delay * (attempt + 1))
                 continue
-        except Exception as e:
-            logger.debug(f"Error fetching CVE {cve_id}: {e}")
+                
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON decode error for {cve_id}: {e}")
             if attempt < max_retries - 1:
-                time.sleep(NVD_API_DELAY)
+                time.sleep(delay)
                 continue
-        
-        # Rate limiting between requests
-        if attempt < max_retries - 1:
-            time.sleep(NVD_API_DELAY)
+                
+        except Exception as e:
+            logger.debug(f"Unexpected error fetching CVE {cve_id}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+                continue
     
-    return None
+    return None, None
 
 
 def fetch_report_date(url: str) -> Optional[str]:
@@ -548,37 +611,70 @@ def fetch_attack_dates(db_path: str, techniques: Set[str]):
     logger.info(f"Fetched dates for {fetched} ATT&CK techniques")
 
 
-def fetch_cve_dates(db_path: str, cves: Set[str]):
+def fetch_cve_dates(db_path: str, cves: Set[str], retry_missing: bool = True):
     """
-    Fetch dates for CVEs from NVD.
+    Fetch dates for CVEs from NVD API 2.0 with improved retry logic.
+    
+    Args:
+        db_path: Path to SQLite database
+        cves: Set of CVE IDs to fetch
+        retry_missing: If True, retry CVEs that previously had no published date
     """
+    import os
+    
     logger.info(f"Fetching dates for {len(cves)} CVEs...")
+    
+    # Check for API key
+    api_key = os.environ.get('NVD_API_KEY')
+    if api_key:
+        logger.info("Using NVD API key for faster rate limits")
+        delay = NVD_API_DELAY_WITH_KEY
+    else:
+        logger.info("No NVD API key found - using default rate limits (set NVD_API_KEY env var for faster fetching)")
+        delay = NVD_API_DELAY
     
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
-    # Check which CVEs we already have
-    cursor.execute("SELECT cve_id FROM cves")
-    existing = {row[0] for row in cursor.fetchall()}
+    # Check which CVEs we already have with dates
+    cursor.execute("SELECT cve_id, published_date FROM cves")
+    existing_rows = cursor.fetchall()
+    existing_with_date = {row[0] for row in existing_rows if row[1]}
+    existing_without_date = {row[0] for row in existing_rows if not row[1]}
     
-    to_fetch = cves - existing
-    logger.info(f"Fetching {len(to_fetch)} new CVEs (already have {len(existing)})")
+    # Determine what to fetch
+    new_cves = cves - existing_with_date - existing_without_date
+    
+    if retry_missing:
+        # Also retry CVEs that we tried before but didn't get a date
+        to_fetch = new_cves | existing_without_date
+        logger.info(f"Fetching {len(new_cves)} new CVEs + retrying {len(existing_without_date)} missing")
+    else:
+        to_fetch = new_cves
+        logger.info(f"Fetching {len(to_fetch)} new CVEs (already have {len(existing_with_date)} with dates)")
+    
+    if not to_fetch:
+        logger.info("No CVEs to fetch")
+        conn.close()
+        return
     
     fetched = 0
-    errors = 0
     not_found = 0
+    errors = 0
+    consecutive_errors = 0
     
     for cve_id in tqdm(to_fetch, desc="Fetching CVE dates"):
         try:
-            date = fetch_cve_date(cve_id)
+            published_date, description = fetch_cve_date(cve_id, api_key=api_key)
             
-            if date:
+            if published_date:
                 cursor.execute("""
                     INSERT OR REPLACE INTO cves 
-                    (cve_id, published_date, last_fetched)
-                    VALUES (?, ?, ?)
-                """, (cve_id, date, datetime.utcnow().isoformat() + 'Z'))
+                    (cve_id, published_date, description, last_fetched)
+                    VALUES (?, ?, ?, ?)
+                """, (cve_id, published_date, description, datetime.utcnow().isoformat() + 'Z'))
                 fetched += 1
+                consecutive_errors = 0  # Reset error counter on success
             else:
                 # Store even if we couldn't fetch (for tracking)
                 cursor.execute("""
@@ -588,24 +684,34 @@ def fetch_cve_dates(db_path: str, cves: Set[str]):
                 """, (cve_id, datetime.utcnow().isoformat() + 'Z'))
                 not_found += 1
             
-            # Commit every 10 successful fetches or every 50 attempts
-            if fetched % 10 == 0 or (fetched + not_found) % 50 == 0:
+            # Commit every 10 successful fetches
+            if fetched % 10 == 0:
                 conn.commit()
             
             # Rate limiting - always sleep between requests
-            time.sleep(NVD_API_DELAY)
+            time.sleep(delay)
             
         except Exception as e:
             logger.debug(f"Error fetching {cve_id}: {e}")
             errors += 1
-            if errors > 10:
-                logger.warning("Too many errors, pausing for 10 seconds...")
+            consecutive_errors += 1
+            
+            # If we have many consecutive errors, back off
+            if consecutive_errors >= 5:
+                logger.warning(f"Multiple consecutive errors, pausing for 30 seconds...")
+                time.sleep(30)
+                consecutive_errors = 0
+            elif consecutive_errors >= 3:
+                logger.warning(f"Consecutive errors, pausing for 10 seconds...")
                 time.sleep(10)
-                errors = 0
     
     conn.commit()
     conn.close()
-    logger.info(f"Fetched dates for {fetched} CVEs ({not_found} not found or failed)")
+    
+    logger.info(f"CVE fetch complete:")
+    logger.info(f"  - Successfully fetched: {fetched}")
+    logger.info(f"  - Not found/failed: {not_found}")
+    logger.info(f"  - Errors: {errors}")
 
 
 def fetch_report_dates(db_path: str, reports: List[Dict[str, str]]):

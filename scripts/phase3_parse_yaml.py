@@ -26,6 +26,7 @@ def extract_rule_fields(yaml_text):
         result = {
             'rule_id': rule_data.get('id'),
             'title': rule_data.get('title'),
+            'description': rule_data.get('description'),  # Rule description text
             'status': rule_data.get('status'),
             'level': rule_data.get('level'),
             'author': rule_data.get('author'),  # YAML-level author field
@@ -38,6 +39,7 @@ def extract_rule_fields(yaml_text):
             '[references]': None,
             'falsepositives': None,
             'detection': None,
+            'related': None,  # Related rules/techniques
             'parse_error': 0
         }
         
@@ -77,12 +79,20 @@ def extract_rule_fields(yaml_text):
         else:
             result['detection'] = None
         
+        # Extract related rules/techniques - always convert to JSON string
+        related = rule_data.get('related', [])
+        if isinstance(related, (list, dict)):
+            result['related'] = json.dumps(related)
+        else:
+            result['related'] = None
+        
         return result
         
     except Exception as e:
         return {
             'rule_id': None,
             'title': None,
+            'description': None,
             'status': None,
             'level': None,
             'author': None,
@@ -95,6 +105,7 @@ def extract_rule_fields(yaml_text):
             '[references]': None,
             'falsepositives': None,
             'detection': None,
+            'related': None,
             'parse_error': 1
         }
 
@@ -187,13 +198,23 @@ def parse_all_yaml(db_path):
     except sqlite3.OperationalError:
         pass
     
+    try:
+        cursor.execute("ALTER TABLE rule_versions ADD COLUMN description TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        cursor.execute("ALTER TABLE rule_versions ADD COLUMN related TEXT")
+    except sqlite3.OperationalError:
+        pass
+    
     conn.commit()
     
     # Get all unparsed versions (or versions missing new fields)
     df = pd.read_sql("""
         SELECT file_path, commit_hash, yaml_text
         FROM rule_versions
-        WHERE (rule_id IS NULL OR parse_error IS NULL OR author IS NULL)
+        WHERE (rule_id IS NULL OR parse_error IS NULL OR author IS NULL OR description IS NULL)
         ORDER BY date
     """, conn)
     
@@ -251,10 +272,21 @@ def parse_all_yaml(db_path):
             else:
                 det_val = str(det_val)
         
+        # Handle related field (may be list/dict)
+        related_val = fields.get('related')
+        if related_val is not None:
+            if isinstance(related_val, str):
+                pass
+            elif isinstance(related_val, (list, dict)):
+                related_val = json.dumps(related_val)
+            else:
+                related_val = str(related_val)
+        
         # Final safety check - ensure no lists/dicts remain
         params = (
             fields.get('rule_id'),
             fields.get('title'),
+            fields.get('description'),  # Rule description
             fields.get('status'),
             fields.get('level'),
             fields.get('author'),  # YAML-level author
@@ -267,6 +299,7 @@ def parse_all_yaml(db_path):
             refs_val,
             fp_val,
             det_val,
+            related_val,  # Related rules/techniques
             fields.get('parse_error', 0),
             file_path,
             commit_hash
@@ -285,6 +318,7 @@ def parse_all_yaml(db_path):
             UPDATE rule_versions
             SET rule_id = ?,
                 title = ?,
+                description = ?,
                 status = ?,
                 level = ?,
                 author = ?,
@@ -297,6 +331,7 @@ def parse_all_yaml(db_path):
                 [references] = ?,
                 falsepositives = ?,
                 detection = ?,
+                related = ?,
                 parse_error = ?
             WHERE file_path = ? AND commit_hash = ?
         """, tuple(safe_params))
