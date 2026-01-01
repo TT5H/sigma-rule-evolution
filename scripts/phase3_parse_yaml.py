@@ -8,17 +8,49 @@ import json
 from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
+import argparse
+from typing import Optional, Dict, Any
 
 
-def extract_rule_fields(yaml_text):
+class SigmaYamlLoader(yaml.SafeLoader):
+    """SafeLoader that ignores unknown !tags instead of failing."""
+    pass
+
+
+def _ignore_unknown_tag(loader, tag_suffix, node):
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node)
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node)
+    return None
+
+
+# Only ignore custom tags like !foo
+SigmaYamlLoader.add_multi_constructor("!", _ignore_unknown_tag)
+
+
+def _clean_yaml_text(s: str) -> str:
+    # Common "real-world repo" issues:
+    # - BOM
+    # - tabs used for indentation
+    # - CRLF
+    s = s.lstrip("\ufeff").replace("\r\n", "\n")
+    if "\t" in s:
+        s = s.replace("\t", "    ")
+    return s
+
+
+def extract_rule_fields(yaml_text) -> Optional[Dict[str, Any]]:
     """
     Extract structured fields from YAML rule.
-    
+
     Returns:
         dict with extracted fields, or None if parsing fails
     """
     try:
-        rule_data = yaml.safe_load(yaml_text)
+        rule_data = yaml.load(_clean_yaml_text(yaml_text), Loader=SigmaYamlLoader)
         if not isinstance(rule_data, dict):
             return None
         
@@ -40,7 +72,9 @@ def extract_rule_fields(yaml_text):
             'falsepositives': None,
             'detection': None,
             'related': None,  # Related rules/techniques
-            'parse_error': 0
+            'parse_error': 0,
+            'parse_error_msg': None,
+            'parse_error_type': None
         }
         
         # Extract logsource
@@ -106,11 +140,13 @@ def extract_rule_fields(yaml_text):
             'falsepositives': None,
             'detection': None,
             'related': None,
-            'parse_error': 1
+            'parse_error': 1,
+            'parse_error_msg': (str(e)[:1500] if str(e) else None),
+            'parse_error_type': e.__class__.__name__
         }
 
 
-def parse_all_yaml(db_path):
+def parse_all_yaml(db_path, retry_errors: bool = False):
     """
     Parse all YAML rule versions and update database.
     
@@ -182,6 +218,16 @@ def parse_all_yaml(db_path):
         cursor.execute("ALTER TABLE rule_versions ADD COLUMN parse_error INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
         pass
+
+    try:
+        cursor.execute("ALTER TABLE rule_versions ADD COLUMN parse_error_msg TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE rule_versions ADD COLUMN parse_error_type TEXT")
+    except sqlite3.OperationalError:
+        pass
     
     try:
         cursor.execute("ALTER TABLE rule_versions ADD COLUMN author TEXT")
@@ -204,18 +250,25 @@ def parse_all_yaml(db_path):
     conn.commit()
     
     # Get all unparsed versions (skip deletions)
-    df = pd.read_sql("""
+    base_sql = """
         SELECT file_path, commit_hash, yaml_text
         FROM rule_versions
         WHERE yaml_text IS NOT NULL
           AND event_type != 'deleted'
-          AND (rule_id IS NULL OR parse_error IS NULL OR author IS NULL OR description IS NULL)
+          AND (
+                (rule_id IS NULL OR author IS NULL OR description IS NULL)
+                OR parse_error IS NULL
+              )
         ORDER BY commit_datetime
-    """, conn)
+    """
+    # Default behavior: do NOT keep retrying known failures forever.
+    if not retry_errors:
+        base_sql = base_sql.replace(")", ") AND (parse_error IS NULL OR parse_error = 0)")
+    df = pd.read_sql(base_sql, conn)
     
     print(f"Parsing {len(df)} rule versions...")
     
-    parsed = 0
+    parsed_ok = 0
     errors = 0
     
     for _, row in tqdm(df.iterrows(), total=len(df), desc="Parsing YAML"):
@@ -224,10 +277,15 @@ def parse_all_yaml(db_path):
         yaml_text = row['yaml_text']
         
         fields = extract_rule_fields(yaml_text)
-        
+
         if fields is None:
             errors += 1
             continue
+
+        if fields.get('parse_error') == 1:
+            errors += 1
+        else:
+            parsed_ok += 1
         
         # Safety check: ensure all list/dict fields are JSON strings (defensive programming)
         # Convert ANY non-string, non-None value to appropriate format
@@ -296,6 +354,8 @@ def parse_all_yaml(db_path):
             det_val,
             related_val,  # Related rules/techniques
             fields.get('parse_error', 0),
+            fields.get('parse_error_msg'),
+            fields.get('parse_error_type'),
             file_path,
             commit_hash
         )
@@ -327,26 +387,30 @@ def parse_all_yaml(db_path):
                 falsepositives = ?,
                 detection = ?,
                 related = ?,
-                parse_error = ?
+                parse_error = ?,
+                parse_error_msg = ?,
+                parse_error_type = ?
             WHERE file_path = ? AND commit_hash = ?
         """, tuple(safe_params))
         
-        parsed += 1
+        parsed_ok += 1
         
-        if parsed % 100 == 0:
+        if (parsed_ok + errors) % 100 == 0:
             conn.commit()
     
     conn.commit()
     conn.close()
     
     print(f"\nPhase 3 Complete:")
-    print(f"  - Parsed {parsed} rule versions")
+    print(f"  - Parsed OK: {parsed_ok}")
     print(f"  - Parse errors: {errors}")
 
 
 if __name__ == "__main__":
-    import sys
-    db_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("../data/sigma_analysis.db")
-    
-    parse_all_yaml(db_path)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("db_path")
+    ap.add_argument("--retry-errors", action="store_true",
+                    help="Retry rows with parse_error=1 (useful after parser improvements)")
+    args = ap.parse_args()
+    parse_all_yaml(args.db_path, retry_errors=args.retry_errors)
 

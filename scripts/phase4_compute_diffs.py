@@ -242,7 +242,7 @@ def compute_all_diffs(db_path):
                    logsource_product, logsource_category, logsource_service,
                    tags, [references], falsepositives, detection, yaml_text
             FROM rule_versions
-            ORDER BY file_path, commit_datetime
+            ORDER BY file_path, commit_datetime, commit_hash
         """, conn)
         
         logger.info(f"Loaded {len(df)} rule versions from database")
@@ -288,7 +288,7 @@ def compute_all_diffs(db_path):
         logger.info("Computing diffs...")
         for file_path, group in tqdm(df.groupby('file_path'), desc="Computing diffs", total=df['file_path'].nunique()):
             try:
-                versions = group.sort_values('commit_datetime').reset_index(drop=True)
+                versions = group.sort_values(['commit_datetime', 'commit_hash']).reset_index(drop=True)
 
                 if len(versions) < 2:
                     logger.debug(f"Skipping {file_path}: only {len(versions)} version(s)")
