@@ -8,12 +8,12 @@ import argparse
 # Add scripts directory to path
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
-from phase1_extract_commits import extract_commit_history
-from phase2_build_snapshots import build_rule_snapshots
-from phase3_parse_yaml import parse_all_yaml
-from phase4_compute_diffs import compute_all_diffs
-from phase5_generate_report import generate_report
-from phase6_fetch_external_dates import fetch_external_dates
+from phase1_extract_commits import extract_commit_history  # type: ignore
+from phase2_build_snapshots import build_rule_snapshots  # type: ignore
+from phase3_parse_yaml import parse_all_yaml  # type: ignore
+from phase4_compute_diffs import compute_all_diffs  # type: ignore
+from phase5_generate_report import generate_report  # type: ignore
+from phase6_fetch_external_dates import fetch_external_dates  # type: ignore
 
 
 def main():
