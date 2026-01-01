@@ -30,8 +30,8 @@ def extract_rule_fields(yaml_text):
             'status': rule_data.get('status'),
             'level': rule_data.get('level'),
             'author': rule_data.get('author'),  # YAML-level author field
-            'date': rule_data.get('date'),  # YAML-level date field (creation date)
-            'modified': rule_data.get('modified'),  # YAML-level modified date
+            'yaml_date': rule_data.get('date'),  # YAML-level date field (creation date)
+            'yaml_modified': rule_data.get('modified'),  # YAML-level modified date
             'logsource_product': None,
             'logsource_category': None,
             'logsource_service': None,
@@ -96,8 +96,8 @@ def extract_rule_fields(yaml_text):
             'status': None,
             'level': None,
             'author': None,
-            'date': None,
-            'modified': None,
+            'yaml_date': None,
+            'yaml_modified': None,
             'logsource_product': None,
             'logsource_category': None,
             'logsource_service': None,
@@ -285,8 +285,8 @@ def parse_all_yaml(db_path):
             fields.get('status'),
             fields.get('level'),
             fields.get('author'),  # YAML-level author
-            fields.get('date'),  # YAML-level date
-            fields.get('modified'),  # YAML-level modified
+            fields.get('yaml_date'),  # YAML-level date
+            fields.get('yaml_modified'),  # YAML-level modified
             fields.get('logsource_product'),
             fields.get('logsource_category'),
             fields.get('logsource_service'),
