@@ -24,7 +24,7 @@ A comprehensive analysis pipeline for studying the evolution of SIGMA detection 
 
 - **Total rule YAML files**: 10,282
 - **Total commits touching rules**: 10,727
-- **Total rule versions**: 45,696
+- **Total rule versions**: 45,695 (99.998% coverage)
 
 ### Edits Over Time
 
@@ -78,25 +78,25 @@ The majority of SIGMA rules are stable, with most rules not being modified for o
 
 ### Change Taxonomy
 
-Out of 35,410 total changes across all rule versions:
+Out of 34,569 total changes across all rule versions:
 
 ![Change Taxonomy](reports/change_taxonomy.png)
 
 | Change Type | Count | Percentage |
 |-------------|-------|------------|
-| Detection logic changes | 9,748 | 27.5% |
-| Metadata changes | 7,384 | 20.9% |
-| Tags changes | 6,651 | 18.8% |
-| References changes | 3,195 | 9.0% |
-| False positives changes | 1,837 | 5.2% |
-| Logsource changes | 1,277 | 3.6% |
+| Detection logic changes | 9,817 | 28.4% |
+| Metadata changes | 7,398 | 21.4% |
+| Tags changes | 6,588 | 19.1% |
+| References changes | 3,101 | 9.0% |
+| False positives changes | 1,682 | 4.9% |
+| Logsource changes | 1,246 | 3.6% |
 
 Detection logic changes represent the largest category, indicating active refinement of rule detection capabilities. Metadata and tags changes are also significant, suggesting ongoing maintenance and categorization efforts.
 
 ### YAML-Level Author Data
 
-- **Rule versions with author field**: 43,967 (96.2%)
-- **Rule versions with modified field**: 25,415 (55.6%)
+- **Rule versions with author field**: 39,775 (96.8%)
+- **Rule versions with modified field**: 22,462 (54.6%)
 
 **Top Authors** (by rule versions):
 1. Florian Roth - 5,218 versions
@@ -441,6 +441,7 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 | **Runtime** | ~2-8 min (10-15x optimized) |
 | **Commits Processed** | 10,727 |
 | **Files Tracked** | 10,282 unique rule files |
+| **File-commit pairs** | 45,696 |
 
 **Features:**
 - Incremental updates (skips already processed commits)
@@ -455,16 +456,17 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 
 | Metric | Before | After Optimization |
 |--------|--------|-------------------|
-| **Processing Speed** | 5.19 it/s | 41.25 it/s |
-| **Total Runtime** | 33 min | **4 min** |
-| **Success Rate** | 99.1% | **99.99%** |
-| **Error Count** | 411 | **5** |
+| **Processing Speed** | 5.19 it/s | 94.02 it/s |
+| **Total Runtime** | 33 min | **1.8 min** |
+| **Success Rate** | 99.1% | **99.998%** |
+| **Error Count** | 411 | **1** |
 
 **Key Optimizations:**
 - `git cat-file -p` instead of `git show` (faster object access)
-- Increased parallel workers (16 → 32)
-- Batch database operations (`executemany` for bulk inserts)
-- SQLite WAL mode with 256MB cache
+- Balanced parallel workers (32) with proper timeout handling
+- Improved error counting (silent skips now counted as errors)
+- SQLite WAL mode with 500MB cache and busy_timeout
+- Rename/move edge case handling with old_path fallback
 
 ---
 
@@ -472,10 +474,15 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 
 | Metric | Value |
 |--------|-------|
-| **Rule Versions Parsed** | 44,364 |
-| **Success Rate** | 99.96% |
-| **Parse Errors** | 18 (0.04%) |
-| **Runtime** | ~2-5 min |
+| **Rule Versions Parsed** | 41,129 |
+| **Success Rate** | 99.6% |
+| **Parse Errors** | 251 (0.6%) |
+| **Runtime** | ~1-2 min |
+
+**Key Features:**
+- Multi-document YAML parsing (handles files with multiple `---` documents)
+- Robust error handling with detailed error messages
+- Proper YAML metadata separation (`yaml_date`/`yaml_modified` vs `commit_datetime`)
 
 **Field Coverage:**
 | Field | Coverage |
@@ -494,12 +501,13 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 
 | Metric | Value |
 |--------|-------|
-| **Diffs Computed** | 35,410 |
-| **Runtime** | ~10-20 min |
+| **Diffs Computed** | 34,569 |
+| **Runtime** | ~13 seconds |
 | **Success Rate** | 100% |
 
 **Change Detection:**
-- Compares consecutive versions of each rule
+- Compares consecutive versions of each rule ordered by `commit_datetime`
+- Deterministic ordering with `commit_hash` tiebreaker for same-timestamp commits
 - Detects 6 categories: detection, logsource, tags, references, falsepositives, metadata
 - Line-level diff metrics (additions/deletions)
 
@@ -527,16 +535,16 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 |--------|-------|
 | **ATT&CK Techniques** | 248/252 (98.4%) |
 | **CVEs** | 144/144 (100%) |
-| **Threat Reports** | 196/237 (82.7%) |
-| **Runtime** | ~5-30 min |
+| **Threat Reports** | 190/230 (82.6%) |
+| **Runtime** | ~3-5 min |
 
 **Performance Features:**
 
 | Feature | Implementation |
 |---------|---------------|
-| **Multi-threaded HTTP** | ThreadPoolExecutor with 8-10 workers |
+| **Multi-threaded HTTP** | ThreadPoolExecutor with 32 workers |
 | **Parallel Selenium** | Driver pool with 4 Chrome instances |
-| **NVD API Key Support** | 50 req/sec vs 0.7 req/sec without key |
+| **NVD API Key Support** | Rolling window rate limiter (50 req/30sec) |
 | **Retry Logic** | Exponential backoff for rate limits |
 
 **Selenium Performance:**
@@ -544,6 +552,12 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 |--------|--------------|---------|
 | Sequential (1 driver) | ~5.2s | ~5 min |
 | Parallel (4 drivers) | ~1.6s | **~1.5 min** |
+
+**Overall Pipeline Performance:**
+- **End-to-end runtime**: ~7-10 minutes
+- **Data quality**: 99.998% snapshot coverage, 99.6% parsing success
+- **Parallel processing**: 32 HTTP workers, 4 Selenium drivers, 12 NVD API workers
+- **Error handling**: Detailed error logging, retry logic, rate limiting
 
 **Threat Report Extraction Methods:**
 1. **URL Patterns** - Instant extraction from `/YYYY/MM/DD/` patterns

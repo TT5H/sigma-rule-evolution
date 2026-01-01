@@ -21,6 +21,9 @@ from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import logging
+import time
+import threading
+from collections import deque
 import sys
 from urllib.parse import urlparse
 from typing import List, Dict, Optional, Set
@@ -47,11 +50,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Configuration
-MAX_WORKERS = 10  # Parallel HTTP workers
+MAX_WORKERS = 32  # Increased parallel HTTP workers for maximum throughput
 NVD_API_DELAY = 6.0  # NVD API: 5 requests per 30 seconds without key (~0.17 req/sec)
 NVD_API_DELAY_WITH_KEY = 0.6  # With API key: 50 requests per 30 seconds (~1.67 req/sec)
+NVD_API_MAX_WORKERS = 12  # Dedicated workers for NVD API calls to maximize rate limit utilization
 ATTACK_API_DELAY = 0.1
 NVD_API_KEY = os.environ.get('NVD_API_KEY')
+
+
+class RollingWindowRateLimiter:
+    """Rate limiter for NVD API with rolling window support."""
+
+    def __init__(self, max_requests: int = 50, window_seconds: int = 30):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests = deque()
+        self.lock = threading.Lock()
+
+    def wait_if_needed(self):
+        """Wait if necessary to stay within rate limits."""
+        with self.lock:
+            current_time = time.time()
+
+            # Remove old requests outside the window
+            while self.requests and current_time - self.requests[0] > self.window_seconds:
+                self.requests.popleft()
+
+            # If we're at the limit, wait until we can make another request
+            if len(self.requests) >= self.max_requests:
+                # Wait until the oldest request expires from the window
+                wait_time = self.window_seconds - (current_time - self.requests[0])
+                if wait_time > 0:
+                    time.sleep(wait_time)
+                    # After waiting, clean up again
+                    current_time = time.time()
+                    while self.requests and current_time - self.requests[0] > self.window_seconds:
+                        self.requests.popleft()
+
+            # Record this request
+            self.requests.append(current_time)
+
+
+# Global rate limiter instance
+_nvd_rate_limiter = RollingWindowRateLimiter(max_requests=50, window_seconds=30)
 
 # Selenium driver pool for parallel fetching
 _selenium_drivers = []
@@ -475,17 +516,21 @@ def load_attack_techniques_bulk() -> Dict[str, Dict]:
 # CVE FETCHING
 # ============================================================
 
-def fetch_cve_date(cve_id: str, max_retries: int = 5, api_key: str = None) -> tuple:
+def fetch_cve_date(cve_id: str, max_retries: int = 5, api_key: str = None, use_rate_limiter: bool = True) -> tuple:
     """Fetch CVE publication date from NVD API 2.0. Returns (date, description)."""
     cve_id = cve_id.upper()
-    
+
     if api_key is None:
         api_key = os.environ.get('NVD_API_KEY', NVD_API_KEY)
-    
-    delay = NVD_API_DELAY_WITH_KEY if api_key else NVD_API_DELAY
-    
+
     for attempt in range(max_retries):
         try:
+            # Use sophisticated rate limiting for API key, fallback to simple delay
+            if use_rate_limiter and api_key:
+                _nvd_rate_limiter.wait_if_needed()
+            else:
+                delay = NVD_API_DELAY_WITH_KEY if api_key else NVD_API_DELAY
+                time.sleep(delay)
             url = f"https://services.nvd.nist.gov/rest/json/cves/2.0?cveId={cve_id}"
             headers = {
                 'User-Agent': 'SIGMA-Analysis/1.0 (Academic Research Tool)',
@@ -534,6 +579,76 @@ def fetch_cve_date(cve_id: str, max_retries: int = 5, api_key: str = None) -> tu
                 continue
     
     return None, None
+
+
+def fetch_cve_dates_parallel(db_path: str, cves: Set[str], max_workers: int = NVD_API_MAX_WORKERS, retry_missing: bool = True):
+    """Fetch dates for CVEs from NVD API using parallel processing with rate limiting."""
+    logger.info(f"Fetching dates for {len(cves)} CVEs using {max_workers} parallel workers...")
+
+    api_key = os.environ.get('NVD_API_KEY')
+    if api_key:
+        logger.info("Using NVD API key with rolling window rate limiter (50 req/30sec)")
+    else:
+        logger.info("No NVD API key - using conservative rate limits")
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Get CVEs that need fetching
+    to_fetch = set(cves)
+    if not retry_missing:
+        # Only fetch new ones
+        cursor.execute("SELECT cve_id FROM cves WHERE published_date IS NOT NULL")
+        existing = {row[0] for row in cursor.fetchall()}
+        to_fetch -= existing
+
+    if not to_fetch:
+        logger.info("No new CVEs to fetch")
+        conn.close()
+        return
+
+    logger.info(f"Fetching {len(to_fetch)} CVEs...")
+
+    def fetch_single_cve(cve_id):
+        """Fetch a single CVE with rate limiting."""
+        return cve_id, fetch_cve_date(cve_id, api_key=api_key, use_rate_limiter=True)
+
+    fetched = 0
+    not_found = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_cve = {executor.submit(fetch_single_cve, cve_id): cve_id for cve_id in to_fetch}
+
+        for future in tqdm(as_completed(future_to_cve), total=len(to_fetch), desc="Fetching CVE dates"):
+            cve_id = future_to_cve[future]
+            try:
+                cve_id, (published_date, description) = future.result()
+
+                if published_date:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO cves (cve_id, published_date, description, last_fetched)
+                        VALUES (?, ?, ?, ?)
+                    """, (cve_id, published_date, description, get_utc_now()))
+                    fetched += 1
+                else:
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO cves (cve_id, last_fetched)
+                        VALUES (?, ?)
+                    """, (cve_id, get_utc_now()))
+                    not_found += 1
+
+                # Commit periodically
+                if (fetched + not_found) % 50 == 0:
+                    conn.commit()
+
+            except Exception as e:
+                logger.error(f"Error fetching CVE {cve_id}: {e}")
+                not_found += 1
+
+    conn.commit()
+    conn.close()
+
+    logger.info(f"Fetched dates for {fetched} CVEs, {not_found} not found or failed")
 
 
 # ============================================================
@@ -701,67 +816,14 @@ def fetch_attack_dates(db_path: str, techniques: Set[str]):
 
 
 def fetch_cve_dates(db_path: str, cves: Set[str], retry_missing: bool = True):
-    """Fetch dates for CVEs from NVD API."""
-    logger.info(f"Fetching dates for {len(cves)} CVEs...")
-    
-    api_key = os.environ.get('NVD_API_KEY')
-    if api_key:
-        logger.info("Using NVD API key for faster rate limits")
-        delay = NVD_API_DELAY_WITH_KEY
-    else:
-        logger.info("No NVD API key - using default rate limits")
-        delay = NVD_API_DELAY
-    
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT cve_id, published_date FROM cves")
-    existing_rows = cursor.fetchall()
-    existing_with_date = {row[0] for row in existing_rows if row[1]}
-    existing_without_date = {row[0] for row in existing_rows if not row[1]}
-    
-    new_cves = cves - existing_with_date - existing_without_date
-    
-    if retry_missing:
-        to_fetch = new_cves | existing_without_date
-        logger.info(f"Fetching {len(new_cves)} new CVEs + retrying {len(existing_without_date)} missing")
-    else:
-        to_fetch = new_cves
-        logger.info(f"Fetching {len(to_fetch)} new CVEs")
-    
-    if not to_fetch:
-        logger.info("No CVEs to fetch")
-        conn.close()
-        return
-    
-    fetched = 0
-    not_found = 0
-    
-    for cve_id in tqdm(to_fetch, desc="Fetching CVE dates"):
-        published_date, description = fetch_cve_date(cve_id, api_key=api_key)
-        
-        if published_date:
-            cursor.execute("""
-                INSERT OR REPLACE INTO cves (cve_id, published_date, description, last_fetched)
-                VALUES (?, ?, ?, ?)
-            """, (cve_id, published_date, description, get_utc_now()))
-            fetched += 1
-        else:
-            cursor.execute("""
-                INSERT OR REPLACE INTO cves (cve_id, last_fetched)
-                VALUES (?, ?)
-            """, (cve_id, get_utc_now()))
-            not_found += 1
-        
-        if fetched % 10 == 0:
-            conn.commit()
-        
-        time.sleep(delay)
-    
-    conn.commit()
-    conn.close()
-    
-    logger.info(f"CVE fetch complete: {fetched} fetched, {not_found} not found")
+    """Fetch dates for CVEs from NVD API using parallel processing."""
+    fetch_cve_dates_parallel(db_path, cves, max_workers=NVD_API_MAX_WORKERS, retry_missing=retry_missing)
+
+
+# Legacy function - now delegates to parallel version
+def fetch_cve_dates_legacy(db_path: str, cves: Set[str], retry_missing: bool = True):
+    """Fetch dates for CVEs from NVD API - legacy sequential version."""
+    fetch_cve_dates_parallel(db_path, cves, max_workers=1, retry_missing=retry_missing)
 
 
 def fetch_report_dates(db_path: str, reports: List[Dict[str, str]], 

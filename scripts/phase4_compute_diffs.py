@@ -201,7 +201,7 @@ def compute_all_diffs(db_path):
         # Optimize for bulk operations
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA cache_size=10000")
+        conn.execute("PRAGMA cache_size=50000")  # Increased cache for better performance
         cursor = conn.cursor()
         
         logger.info("Creating version_diffs table...")
@@ -282,7 +282,7 @@ def compute_all_diffs(db_path):
         
         # Prepare batch inserts
         batch_inserts = []
-        batch_size = 100
+        batch_size = 500  # Increased for better performance
         
         # Group by file_path and compute diffs between consecutive versions
         logger.info("Computing diffs...")

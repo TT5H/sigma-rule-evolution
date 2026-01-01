@@ -42,7 +42,7 @@ def get_file_content_at_commit(repo_path, commit_hash, file_path, try_parent=Fal
                 cwd=str(repo_path),
                 capture_output=True,
                 text=False,  # Get bytes first to handle encoding properly
-                timeout=5,  # Reduced timeout since cat-file is faster
+                timeout=20,  # Reasonable timeout for git operations under load
                 shell=False,
                 env={**os.environ, 'GIT_TERMINAL_PROMPT': '0', 'GIT_LFS_SKIP_SMUDGE': '1'}  # Skip LFS for speed
             )
@@ -79,7 +79,8 @@ def process_file_commits(args):
     # Optimize SQLite for bulk inserts
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    conn.execute("PRAGMA cache_size=10000")
+    conn.execute("PRAGMA cache_size=50000")  # Maximum cache per worker for performance
+    conn.execute("PRAGMA busy_timeout=60000")  # 60 second busy timeout for locking
     cursor = conn.cursor()
     
     processed = 0
@@ -145,9 +146,15 @@ def process_file_commits(args):
                     'snapshot'  # event_type for normal snapshots
                 ))
                 processed += 1
+            else:
+                # Count silent skips as errors
+                errors += 1
+                # Log for debugging (will help identify git timeouts vs other issues)
+                if errors <= 10:  # Only log first 10 to avoid spam
+                    print(f"[PHASE2 SKIP] {file_path}@{commit_hash[:8]} - git timeout/no content")
 
         # Execute batch inserts periodically
-        if len(batch_inserts) >= 50:
+        if len(batch_inserts) >= 1000:  # Much larger batch size for maximum performance
             cursor.executemany("""
                 INSERT OR REPLACE INTO rule_versions
                 (file_path, commit_hash, commit_datetime, yaml_text, event_type)
@@ -266,22 +273,22 @@ def build_rule_snapshots(repo_path, db_path):
     print(f"\nProcessing {len(file_groups)} files with parallel workers...")
     
     # Use ThreadPoolExecutor for I/O-bound operations (git commands)
-    # Increase workers significantly for I/O-bound operations
-    # Git operations are I/O bound, so we can use many more workers
-    cpu_count = os.cpu_count() or 4
-    max_workers = min(32, cpu_count * 4)  # More aggressive parallelization
+    # Balanced workers for git operations - avoid overload while maintaining parallelism
+    cpu_count = os.cpu_count() or 8
+    max_workers = min(32, cpu_count * 4)  # Balanced parallelization to avoid git overload
     total_processed = 0
     total_errors = 0
     
     print(f"Using {max_workers} parallel workers...")
     
-    # Optimize database for concurrent access and performance
-    temp_conn = sqlite3.connect(db_path)
+    # Optimize database for maximum concurrent access and performance
+    temp_conn = sqlite3.connect(db_path, timeout=60.0)
     temp_conn.execute("PRAGMA journal_mode=WAL")
     temp_conn.execute("PRAGMA synchronous=NORMAL")
-    temp_conn.execute("PRAGMA cache_size=20000")
+    temp_conn.execute("PRAGMA cache_size=200000")  # 200MB cache for maximum performance
     temp_conn.execute("PRAGMA temp_store=MEMORY")
-    temp_conn.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+    temp_conn.execute("PRAGMA mmap_size=536870912")  # 512MB memory-mapped I/O
+    temp_conn.execute("PRAGMA wal_autocheckpoint=1000")  # More frequent checkpoints
     temp_conn.close()
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -299,8 +306,9 @@ def build_rule_snapshots(repo_path, db_path):
                 total_processed += processed
                 total_errors += errors
             except Exception as e:
-                # Log error but continue
+                # Log actual error for debugging
                 total_errors += 1
+                print(f"[PHASE2 ERROR] file={file_path} err={type(e).__name__}: {e}")
     
     print(f"\nPhase 2 Complete:")
     print(f"  - Processed {total_processed} rule versions")
