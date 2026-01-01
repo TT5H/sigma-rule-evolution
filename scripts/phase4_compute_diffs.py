@@ -410,8 +410,13 @@ def compute_all_diffs(db_path):
 
 
 if __name__ == "__main__":
-    import sys
-    db_path = Path(sys.argv[2]) if len(sys.argv) > 1 else Path("../data/sigma_analysis.db")
-    
+    import argparse
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("db_path", nargs="?", default="data/sigma_analysis.db")
+    args = parser.parse_args()
+    db_path = Path(args.db_path)
+
     compute_all_diffs(db_path)
 
