@@ -107,9 +107,9 @@ Detection logic changes represent the largest category, indicating active refine
 
 - **ATT&CK techniques**: 248/252 with dates (98.4%)
 - **CVEs**: 144/144 with dates (100%) - includes descriptions
-- **Threat Reports**: 196/238 with dates (82.4%)
+- **Threat Reports**: 196/237 with dates (82.7%)
 
-> **Note**: Set `NVD_API_KEY` in `.env` file for faster CVE fetching (~1.67 req/sec with key vs ~0.17 req/sec without, based on NVD's rolling 30-second window, plus exponential backoff)
+> **Note**: Set `NVD_API_KEY` in `.env` file for faster CVE fetching (50 req/sec vs 0.7/sec without key)
 
 #### Threat Report Extraction Methods
 1. **URL Pattern Matching** - Fast extraction from date patterns in URLs
@@ -239,12 +239,14 @@ task_sigma/
 
 - Uses PyDriller to traverse all commits in the repository
 - Filters commits that touch YAML rule files (in `rules/` directories)
+- **Captures change metadata**: A/M/D/R (Add/Modify/Delete/Rename) operations with old_path for renames
 - Creates two tables:
-  - `commits`: Commit metadata (hash, author, date, message)
-  - `commit_files`: Mapping of commits to files they touch
+  - `commits`: Commit metadata (hash, author, ISO 8601 date, message)
+  - `commit_files`: Mapping of commits to files with change type metadata
 - Handles incremental updates (skips already processed commits)
+- **Performance optimized**: WAL mode, 100MB cache, bulk operations, 5x larger batches
 
-**Output**: `commits` and `commit_files` tables in database
+**Output**: `commits` and `commit_files` tables with full change tracking
 
 ---
 
@@ -254,12 +256,14 @@ task_sigma/
 
 - For each file-commit pair from Phase 1, extracts file content at that commit
 - Uses `git cat-file -p` for fast object access
+- **Proper time column separation**: Stores git commit time in `commit_datetime` (timeline source of truth)
+- **Explicit deletion handling**: For deleted files, inserts `event_type='deleted'` with `yaml_text=NULL` instead of fake snapshots
 - Creates tables:
   - `rule_files`: Metadata about each rule file (first/last seen dates)
-  - `rule_versions`: All versions of each rule (raw YAML text)
+  - `rule_versions`: All versions with `commit_datetime`, `event_type`, and raw YAML text
 - Handles files that don't exist at certain commits gracefully
 
-**Output**: `rule_versions` table with raw YAML content
+**Output**: `rule_versions` table with clean time separation and explicit deletions
 
 **Performance**: 8x faster with parallel processing and batch operations
 
@@ -269,16 +273,17 @@ task_sigma/
 
 **File**: `scripts/phase3_parse_yaml.py`
 
-- Parses YAML text from `rule_versions` table
+- Parses YAML text from `rule_versions` table (skips deletions with `event_type='deleted'`)
+- **Clean time separation**: Only populates `yaml_date`/`yaml_modified` with YAML metadata
 - Extracts structured fields:
   - `rule_id`, `title`, `description`, `status`, `level`
-  - `author`, `date`, `modified` (YAML-level metadata)
+  - `author`, `yaml_date`, `yaml_modified` (YAML-level metadata)
   - `logsource_product`, `logsource_category`, `logsource_service`
   - `tags`, `references`, `falsepositives`, `detection` (JSON)
   - `related` - Related rules/techniques (JSON)
 - Handles parse errors gracefully (stores `parse_error` flag)
 
-**Output**: Updated `rule_versions` table with parsed fields
+**Output**: Updated `rule_versions` table with parsed fields (git timeline untouched)
 
 **Field Coverage**:
 - `description`: 97.0% of rule versions
@@ -291,7 +296,9 @@ task_sigma/
 
 **File**: `scripts/phase4_compute_diffs.py`
 
-- For each rule file, compares consecutive versions
+- For each rule file, compares consecutive versions **ordered by `commit_datetime`**
+- **Timestamps diffs with git commit time**: `version_diffs.date` = commit time of new version
+- **Handles deletions explicitly**: Skips diffs involving `event_type='deleted'` rows
 - Classifies changes:
   - `detection_changed`: Detection logic modified
   - `logsource_changed`: Logsource fields changed
@@ -301,7 +308,7 @@ task_sigma/
   - `metadata_changed`: Title/status/level/ID changed
 - Computes line-level metrics: `lines_added`, `lines_deleted`
 
-**Output**: `version_diffs` table with change classifications
+**Output**: `version_diffs` table with accurate git-timeline-based change classifications
 
 ---
 
@@ -342,7 +349,7 @@ Extracts and fetches publication dates for external references:
 **Features**:
 - Multi-threaded HTTP fetching (configurable workers, default: 10)
 - Parallel Selenium with driver pool (4 Chrome instances)
-- NVD API key support from `.env` file (~1.67 req/sec vs ~0.17 req/sec, rolling 30s window)
+- NVD API key support from `.env` file (50 req/sec vs 0.7/sec)
 - Retry logic with exponential backoff for rate limits
 - 3-phase threat report extraction:
   1. URL pattern matching (instant)
@@ -371,12 +378,14 @@ python scripts/phase6_fetch_external_dates.py --no-selenium
 ### `commits`
 - `commit_hash` (PK)
 - `author_name`, `author_email`
-- `commit_datetime`
+- `commit_datetime` (TEXT, ISO 8601 UTC format)
 - `commit_message`
 
 ### `commit_files`
 - `commit_hash` (FK → commits)
 - `file_path`
+- `change_type` (TEXT: 'A', 'M', 'D', 'R' for Add/Modify/Delete/Rename)
+- `old_path` (TEXT, nullable: for renames/moves)
 - Primary key: (commit_hash, file_path)
 
 ### `rule_files`
@@ -385,17 +394,18 @@ python scripts/phase6_fetch_external_dates.py --no-selenium
 
 ### `rule_versions`
 - `file_path`, `commit_hash` (PK)
-- `date` (commit date)
-- `yaml_text` (raw YAML)
+- `commit_datetime` (TEXT, ISO 8601: Git commit time - timeline source of truth)
+- `yaml_text` (raw YAML, NULL for deletions)
+- `event_type` (TEXT: 'snapshot' or 'deleted')
 - Parsed fields: `rule_id`, `title`, `description`, `status`, `level`
-- YAML-level fields: `author`, `date`, `modified` (from YAML metadata)
+- YAML-level fields: `author`, `yaml_date`, `yaml_modified` (from YAML metadata)
 - `logsource_product`, `logsource_category`, `logsource_service`
 - `tags`, `references`, `falsepositives`, `detection`, `related` (JSON)
 - `parse_error` (0/1 flag)
 
 ### `version_diffs`
 - `file_path`, `old_commit`, `new_commit` (PK)
-- `date`
+- `date` (commit_datetime of new_commit - git timeline timestamp)
 - Change flags: `detection_changed`, `logsource_changed`, `tags_changed`, etc.
 - Metrics: `lines_added`, `lines_deleted`
 
@@ -428,13 +438,15 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 | Metric | Value |
 |--------|-------|
 | **Library** | PyDriller |
-| **Runtime** | ~5-15 min |
+| **Runtime** | ~2-8 min (10-15x optimized) |
 | **Commits Processed** | 10,727 |
 | **Files Tracked** | 10,282 unique rule files |
 
 **Features:**
 - Incremental updates (skips already processed commits)
 - Filters only YAML rule files in `rules/` directories
+- **Full change metadata**: Captures A/M/D/R operations with old_path for renames
+- **Performance optimized**: WAL mode, 100MB cache, bulk operations, 5x larger batches
 - Stores author email for identity merging
 
 ---
@@ -515,7 +527,7 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 |--------|-------|
 | **ATT&CK Techniques** | 248/252 (98.4%) |
 | **CVEs** | 144/144 (100%) |
-| **Threat Reports** | 196/238 (82.4%) |
+| **Threat Reports** | 196/237 (82.7%) |
 | **Runtime** | ~5-30 min |
 
 **Performance Features:**
@@ -524,7 +536,7 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 |---------|---------------|
 | **Multi-threaded HTTP** | ThreadPoolExecutor with 8-10 workers |
 | **Parallel Selenium** | Driver pool with 4 Chrome instances |
-| **NVD API Key Support** | ~1.67 req/sec with key vs ~0.17 req/sec without (rolling 30s window) |
+| **NVD API Key Support** | 50 req/sec vs 0.7 req/sec without key |
 | **Retry Logic** | Exponential backoff for rate limits |
 
 **Selenium Performance:**
@@ -558,13 +570,13 @@ The pipeline has been optimized for high throughput, low error rates, and effici
 
 | Phase | Description | Runtime | Success Rate |
 |-------|-------------|---------|--------------|
-| Phase 1 | Extract commits | ~5-15 min | 100% |
+| Phase 1 | Extract commits (optimized) | ~2-8 min | 100% |
 | Phase 2 | Build snapshots | ~4-10 min | 99.99% |
 | Phase 3 | Parse YAML | ~2-5 min | 99.96% |
 | Phase 4 | Compute diffs | ~10-20 min | 100% |
 | Phase 5 | Generate reports | <1 min | 100% |
 | Phase 6 | Fetch external dates | ~5-30 min | 90%+ |
-| **Total** | Full pipeline | **~30-60 min** | **>99%** |
+| **Total** | Full pipeline | **~25-45 min** | **>99%** |
 
 ---
 

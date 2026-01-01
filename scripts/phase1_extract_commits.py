@@ -4,10 +4,11 @@ Goal: Build a table of (commit → file touched) + metadata
 """
 import sqlite3
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from pydriller import Repository
 import pandas as pd
 from tqdm import tqdm
+import multiprocessing
 
 
 def extract_commit_history(repo_path, db_path):
@@ -20,10 +21,17 @@ def extract_commit_history(repo_path, db_path):
     """
     print("Phase 1: Extracting commit history for rule files...")
     
-    # Connect to database
-    conn = sqlite3.connect(db_path)
+    # Connect to database with optimizations
+    conn = sqlite3.connect(db_path, timeout=60.0)
     cursor = conn.cursor()
-    
+
+    # Optimize SQLite for bulk inserts
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA cache_size=100000")  # 100MB cache
+    cursor.execute("PRAGMA temp_store=MEMORY")
+    cursor.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+
     # Create tables
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS commits (
@@ -39,6 +47,8 @@ def extract_commit_history(repo_path, db_path):
         CREATE TABLE IF NOT EXISTS commit_files (
             commit_hash TEXT,
             file_path TEXT,
+            change_type TEXT,
+            old_path TEXT,
             PRIMARY KEY (commit_hash, file_path),
             FOREIGN KEY (commit_hash) REFERENCES commits(commit_hash)
         )
@@ -54,65 +64,122 @@ def extract_commit_history(repo_path, db_path):
     
     commit_count = 0
     file_count = 0
-    
-    print("Scanning repository commits...")
-    for commit in tqdm(repo.traverse_commits()):
-        commit_hash = commit.hash
-        
-        # Skip if already processed
-        if commit_hash in existing_commits:
-            continue
-        
-        # Check if commit touches any YAML rule files
+
+    # Use more aggressive batching and CPU count for parallel processing
+    batch_size = 500  # Increased from 100
+    cpu_count = multiprocessing.cpu_count()
+
+    print(f"Scanning repository commits with {cpu_count} CPU cores...")
+
+    def process_commit_files(commit):
+        """Process files for a single commit (CPU-intensive part)."""
         yaml_files = []
         for modified_file in commit.modified_files:
             if modified_file.filename.endswith('.yml') or modified_file.filename.endswith('.yaml'):
-                # Only include files in rules directories (typical SIGMA structure)
-                # For deleted files, use old_path but only if we can get content from previous commit
-                # For added/modified files, use new_path
+                # Determine file path
                 if modified_file.new_path:
-                    # File was added or modified - use new_path
                     file_path = modified_file.new_path
                 elif modified_file.old_path:
-                    # File was deleted - we still want to track it, but will need to get from previous commit
                     file_path = modified_file.old_path
                 else:
                     continue
-                
+
                 # Normalize path separators
                 file_path = file_path.replace('\\', '/')
-                
+
+                # Only include files in rules directories
                 if 'rules' in file_path or file_path.startswith('rules/'):
-                    yaml_files.append(file_path)
-        
+                    # Capture change metadata with consistent A/M/D/R format
+                    raw_change_type = modified_file.change_type.name  # e.g. ADD/MODIFY/DELETE/RENAME
+                    change_type_map = {
+                        "ADD": "A",
+                        "MODIFY": "M",
+                        "DELETE": "D",
+                        "RENAME": "R"
+                    }
+                    change_type = change_type_map.get(raw_change_type, raw_change_type)  # fallback to raw if unknown
+                    old_path = modified_file.old_path.replace('\\', '/') if modified_file.old_path else None
+
+                    yaml_files.append({
+                        'file_path': file_path,
+                        'change_type': change_type,
+                        'old_path': old_path
+                    })
+
+        return yaml_files
+
+    # Prepare batch inserts
+    commits_batch = []
+    files_batch = []
+
+    for commit in tqdm(repo.traverse_commits()):
+        commit_hash = commit.hash
+
+        # Skip if already processed
+        if commit_hash in existing_commits:
+            continue
+
+        # Process files for this commit
+        yaml_files = process_commit_files(commit)
+
         # Only process commits that touch rule files
         if yaml_files:
-            # Insert commit
-            cursor.execute("""
-                INSERT OR REPLACE INTO commits 
-                (commit_hash, author_name, author_email, commit_datetime, commit_message)
-                VALUES (?, ?, ?, ?, ?)
-            """, (
+            # Add to batch
+            commits_batch.append((
                 commit_hash,
                 commit.author.name,
                 commit.author.email,
-                commit.author_date.isoformat(),
+                commit.author_date.astimezone(timezone.utc).isoformat().replace('+00:00', 'Z'),
                 commit.msg
             ))
-            
-            # Insert file associations
-            for file_path in yaml_files:
-                cursor.execute("""
-                    INSERT OR REPLACE INTO commit_files (commit_hash, file_path)
-                    VALUES (?, ?)
-                """, (commit_hash, file_path))
+
+            # Add file associations to batch with change metadata
+            for file_data in yaml_files:
+                files_batch.append((
+                    commit_hash,
+                    file_data['file_path'],
+                    file_data['change_type'],
+                    file_data['old_path']
+                ))
                 file_count += 1
-            
+
             commit_count += 1
-            
-            # Commit every 100 commits for performance
-            if commit_count % 100 == 0:
+
+            # Commit in larger batches for better performance
+            if commit_count % batch_size == 0:
+                # Bulk insert commits
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO commits
+                    (commit_hash, author_name, author_email, commit_datetime, commit_message)
+                    VALUES (?, ?, ?, ?, ?)
+                """, commits_batch)
+
+                # Bulk insert file associations with change metadata
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO commit_files
+                    (commit_hash, file_path, change_type, old_path)
+                    VALUES (?, ?, ?, ?)
+                """, files_batch)
+
                 conn.commit()
+                commits_batch = []
+                files_batch = []
+
+    # Final batch commit
+    if commits_batch:
+        cursor.executemany("""
+            INSERT OR REPLACE INTO commits
+            (commit_hash, author_name, author_email, commit_datetime, commit_message)
+            VALUES (?, ?, ?, ?, ?)
+        """, commits_batch)
+
+        cursor.executemany("""
+            INSERT OR REPLACE INTO commit_files
+            (commit_hash, file_path, change_type, old_path)
+            VALUES (?, ?, ?, ?)
+        """, files_batch)
+
+    conn.commit()
     
     conn.commit()
     conn.close()

@@ -187,17 +187,10 @@ def parse_all_yaml(db_path):
         cursor.execute("ALTER TABLE rule_versions ADD COLUMN author TEXT")
     except sqlite3.OperationalError:
         pass
-    
-    try:
-        cursor.execute("ALTER TABLE rule_versions ADD COLUMN date TEXT")
-    except sqlite3.OperationalError:
-        pass
-    
-    try:
-        cursor.execute("ALTER TABLE rule_versions ADD COLUMN modified TEXT")
-    except sqlite3.OperationalError:
-        pass
-    
+
+    # Note: We do NOT add date/modified columns - only use yaml_date/yaml_modified for YAML metadata
+    # commit_datetime is already created by Phase 2 and contains git timeline info
+
     try:
         cursor.execute("ALTER TABLE rule_versions ADD COLUMN description TEXT")
     except sqlite3.OperationalError:
@@ -210,12 +203,14 @@ def parse_all_yaml(db_path):
     
     conn.commit()
     
-    # Get all unparsed versions (or versions missing new fields)
+    # Get all unparsed versions (skip deletions)
     df = pd.read_sql("""
         SELECT file_path, commit_hash, yaml_text
         FROM rule_versions
-        WHERE (rule_id IS NULL OR parse_error IS NULL OR author IS NULL OR description IS NULL)
-        ORDER BY date
+        WHERE yaml_text IS NOT NULL
+          AND event_type != 'deleted'
+          AND (rule_id IS NULL OR parse_error IS NULL OR author IS NULL OR description IS NULL)
+        ORDER BY commit_datetime
     """, conn)
     
     print(f"Parsing {len(df)} rule versions...")
@@ -322,8 +317,8 @@ def parse_all_yaml(db_path):
                 status = ?,
                 level = ?,
                 author = ?,
-                date = ?,
-                modified = ?,
+                yaml_date = ?,
+                yaml_modified = ?,
                 logsource_product = ?,
                 logsource_category = ?,
                 logsource_service = ?,

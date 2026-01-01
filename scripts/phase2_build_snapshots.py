@@ -113,41 +113,55 @@ def process_file_commits(args):
     # Process each commit for this file
     for _, row in commits_df.iterrows():
         commit_hash = row['commit_hash']
-        date = row['commit_datetime']
-        
+        change_type = row['change_type']
+        commit_datetime = row['commit_datetime']
+
         # Skip if already processed
         if commit_hash in existing_commits:
             continue
-        
-        # Get file content at this commit
-        # Try parent commit if file doesn't exist (handles deletions)
-        yaml_text = get_file_content_at_commit(repo_path, commit_hash, file_path, try_parent=True)
-        
-        if yaml_text is None:
-            # File doesn't exist at this commit or parent - this is normal for deleted files
-            errors += 1
-            continue
-        
-        # Add to batch
-        batch_inserts.append((file_path, commit_hash, date, yaml_text))
-        processed += 1
-        
+
+        # Handle different change types
+        if change_type in ('D', 'DELETE'):  # Deleted
+            # Insert deletion marker without trying to get file content
+            batch_inserts.append((
+                file_path,
+                commit_hash,
+                commit_datetime,
+                None,  # yaml_text = NULL for deletions
+                'deleted'  # event_type
+            ))
+            processed += 1
+        else:  # Added, Modified, or Renamed
+            # Get file content at this commit
+            yaml_text = get_file_content_at_commit(repo_path, commit_hash, file_path, try_parent=False)
+
+            if yaml_text is not None:
+                # Add to batch
+                batch_inserts.append((
+                    file_path,
+                    commit_hash,
+                    commit_datetime,
+                    yaml_text,
+                    'snapshot'  # event_type for normal snapshots
+                ))
+                processed += 1
+
         # Execute batch inserts periodically
         if len(batch_inserts) >= 50:
             cursor.executemany("""
                 INSERT OR REPLACE INTO rule_versions
-                (file_path, commit_hash, date, yaml_text)
-                VALUES (?, ?, ?, ?)
+                (file_path, commit_hash, commit_datetime, yaml_text, event_type)
+                VALUES (?, ?, ?, ?, ?)
             """, batch_inserts)
             conn.commit()
             batch_inserts = []
-    
+
     # Insert remaining batch
     if batch_inserts:
         cursor.executemany("""
             INSERT OR REPLACE INTO rule_versions
-            (file_path, commit_hash, date, yaml_text)
-            VALUES (?, ?, ?, ?)
+            (file_path, commit_hash, commit_datetime, yaml_text, event_type)
+            VALUES (?, ?, ?, ?, ?)
         """, batch_inserts)
     
     conn.commit()
@@ -182,8 +196,9 @@ def build_rule_snapshots(repo_path, db_path):
         CREATE TABLE IF NOT EXISTS rule_versions (
             file_path TEXT,
             commit_hash TEXT,
-            date TEXT,
+            commit_datetime TEXT,
             yaml_text TEXT,
+            event_type TEXT,
             rule_id TEXT,
             title TEXT,
             status TEXT,
@@ -191,11 +206,13 @@ def build_rule_snapshots(repo_path, db_path):
             logsource_category TEXT,
             tags TEXT,
             [references] TEXT,
+            yaml_date TEXT,
+            yaml_modified TEXT,
             PRIMARY KEY (file_path, commit_hash),
             FOREIGN KEY (commit_hash) REFERENCES commits(commit_hash)
         )
     """)
-    
+
     # Create indexes for faster lookups
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_rule_versions_file_commit 
@@ -209,9 +226,9 @@ def build_rule_snapshots(repo_path, db_path):
     
     conn.commit()
     
-    # Get all commit-file pairs
+    # Get all commit-file pairs with change metadata
     df = pd.read_sql("""
-        SELECT cf.commit_hash, cf.file_path, c.commit_datetime
+        SELECT cf.commit_hash, cf.file_path, cf.change_type, cf.old_path, c.commit_datetime
         FROM commit_files cf
         JOIN commits c ON cf.commit_hash = c.commit_hash
         ORDER BY c.commit_datetime, cf.file_path

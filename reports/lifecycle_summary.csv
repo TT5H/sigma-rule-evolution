@@ -1,6 +1,6 @@
 metric,value
-total_rules,10282.0
-stable_rules_6plus_months,8786.0
-stable_percent,85.45030149776308
-avg_days_since_edit,952.3040264539973
-median_days_since_edit,1063.0
+total_rules,10245.0
+stable_rules_6plus_months,8755.0
+stable_percent,85.45632015617375
+avg_days_since_edit,954.1284529038555
+median_days_since_edit,1064.0

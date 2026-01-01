@@ -2,20 +2,20 @@ SIGMA Rule Longitudinal Analysis - Initial Findings
 ============================================================
 
 1. Repository Overview
-   Total rule YAML files: 10282
+   Total rule YAML files: 10245
    Total commits touching rules: 10727
 
 2. Most Edited Rules (Top 10)
-   1. rules\windows\process_access\sysmon_in_memory_assembly_execution.yml: 44 edits
-   2. rules\proxy\proxy_ua_apt.yml: 41 edits
-   3. rules\windows\builtin\win_alert_mimikatz_keywords.yml: 39 edits
-   4. rules\windows\image_load\image_load_side_load_from_non_system_location.yml: 38 edits
-   5. rules\windows\powershell\powershell_script\posh_ps_malicious_commandlets.yml: 37 edits
-   6. rules\windows\builtin\win_susp_process_creations.yml: 33 edits
-   7. rules\windows\registry\registry_set\registry_set_asep_reg_keys_modification_currentversion.yml: 32 edits
-   8. rules\windows\powershell\powershell_cmdline_specific_comb_methods.yml: 31 edits
-   9. rules\windows\process_access\sysmon_cred_dump_lsass_access.yml: 30 edits
-   10. rules\windows\process_access\proc_access_win_direct_syscall_ntopenprocess.yml: 30 edits
+   1. rules/windows/process_access/sysmon_in_memory_assembly_execution.yml: 44 edits
+   2. rules/proxy/proxy_ua_apt.yml: 41 edits
+   3. rules/windows/builtin/win_alert_mimikatz_keywords.yml: 39 edits
+   4. rules/windows/image_load/image_load_side_load_from_non_system_location.yml: 38 edits
+   5. rules/windows/powershell/powershell_script/posh_ps_malicious_commandlets.yml: 37 edits
+   6. rules/windows/builtin/win_susp_process_creations.yml: 33 edits
+   7. rules/windows/registry/registry_set/registry_set_asep_reg_keys_modification_currentversion.yml: 32 edits
+   8. rules/windows/powershell/powershell_cmdline_specific_comb_methods.yml: 31 edits
+   9. rules/windows/process_access/sysmon_cred_dump_lsass_access.yml: 30 edits
+   10. rules/windows/process_access/proc_access_win_direct_syscall_ntopenprocess.yml: 30 edits
 
 3. Top Contributors (Top 10) - Merged by Identity
    152. Nasreddine Bencherchali: 12720 commits (27.8%)
@@ -30,13 +30,13 @@ SIGMA Rule Longitudinal Analysis - Initial Findings
    280. Austin Songer: 530 commits (1.2%)
 
 4. Lifecycle Signals
-   Rules stable for 6+ months: 8786 (85.5%)
-   Average days since last edit: 952.3
+   Rules stable for 6+ months: 8755 (85.5%)
+   Average days since last edit: 954.1
 
 5. Change Taxonomy
-   Detection logic changes: 9748 (27.5%)
-   Logsource changes: 1277 (3.6%)
-   Tags changes: 6651 (18.8%)
-   References changes: 3195 (9.0%)
-   False positives changes: 1837 (5.2%)
-   Metadata changes: 7384 (20.9%)
+   Detection logic changes: 9647 (28.0%)
+   Logsource changes: 1253 (3.6%)
+   Tags changes: 6597 (19.2%)
+   References changes: 3141 (9.1%)
+   False positives changes: 1801 (5.2%)
+   Metadata changes: 7295 (21.2%)

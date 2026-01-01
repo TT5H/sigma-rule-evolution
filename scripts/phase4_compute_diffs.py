@@ -237,13 +237,12 @@ def compute_all_diffs(db_path):
         # Get all rule versions ordered by file and date
         logger.info("Loading rule versions from database...")
         df = pd.read_sql("""
-            SELECT file_path, commit_hash, date,
+            SELECT file_path, commit_hash, commit_datetime, event_type,
                    rule_id, title, status, level,
                    logsource_product, logsource_category, logsource_service,
                    tags, [references], falsepositives, detection, yaml_text
             FROM rule_versions
-            WHERE yaml_text IS NOT NULL
-            ORDER BY file_path, date
+            ORDER BY file_path, commit_datetime
         """, conn)
         
         logger.info(f"Loaded {len(df)} rule versions from database")
@@ -289,38 +288,42 @@ def compute_all_diffs(db_path):
         logger.info("Computing diffs...")
         for file_path, group in tqdm(df.groupby('file_path'), desc="Computing diffs", total=df['file_path'].nunique()):
             try:
-                versions = group.sort_values('date').reset_index(drop=True)
-                
+                versions = group.sort_values('commit_datetime').reset_index(drop=True)
+
                 if len(versions) < 2:
                     logger.debug(f"Skipping {file_path}: only {len(versions)} version(s)")
                     continue
-                
+
                 for i in range(1, len(versions)):
                     try:
                         old_version = versions.iloc[i-1].to_dict()
                         new_version = versions.iloc[i].to_dict()
-                        
+
                         old_commit = old_version['commit_hash']
                         new_commit = new_version['commit_hash']
-                        date = new_version['date']
-                        
+                        commit_datetime = new_version['commit_datetime']
+
                         # Check if diff already exists
                         if (file_path, old_commit, new_commit) in existing_diffs_set:
                             skipped += 1
                             continue
-                        
+
+                        # Skip diffs involving deletions (handle them explicitly)
+                        if old_version.get('event_type') == 'deleted' or new_version.get('event_type') == 'deleted':
+                            continue
+
                         # Compute diff with logging context
                         diff_result = compute_diff(
-                            old_version, 
+                            old_version,
                             new_version,
                             file_path=file_path,
                             old_commit=old_commit,
                             new_commit=new_commit
                         )
-                        
+
                         # Add to batch
                         batch_inserts.append((
-                            file_path, old_commit, new_commit, date,
+                            file_path, old_commit, new_commit, commit_datetime,
                             diff_result['detection_changed'],
                             diff_result['logsource_changed'],
                             diff_result['tags_changed'],
@@ -330,7 +333,7 @@ def compute_all_diffs(db_path):
                             diff_result['lines_added'],
                             diff_result['lines_deleted']
                         ))
-                        
+
                         diffs_computed += 1
                         
                         # Execute batch inserts periodically
@@ -345,7 +348,10 @@ def compute_all_diffs(db_path):
                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 """, batch_inserts)
                                 conn.commit()
-                                logger.debug(f"Committed batch of {len(batch_inserts)} diffs")
+                                # Check actual count
+                                cursor.execute("SELECT COUNT(*) FROM version_diffs")
+                                actual_count = cursor.fetchone()[0]
+                                logger.info(f"Committed batch of {len(batch_inserts)} diffs, total in DB: {actual_count}")
                                 batch_inserts = []
                             except Exception as e:
                                 logger.error(f"Error inserting batch: {e}", exc_info=True)
